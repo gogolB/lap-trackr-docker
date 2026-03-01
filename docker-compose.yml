@@ -1,0 +1,120 @@
+services:
+  db:
+    image: postgres:15-bookworm
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - /data/postgres:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  redis:
+    image: redis:7-bookworm
+    restart: unless-stopped
+    volumes:
+      - /data/redis:/data
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  api:
+    build:
+      context: ./services/api
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      JWT_SECRET: ${JWT_SECRET}
+      JWT_ALGORITHM: ${JWT_ALGORITHM}
+      JWT_EXPIRY_MINUTES: ${JWT_EXPIRY_MINUTES}
+      REDIS_URL: ${REDIS_URL}
+      DATA_DIR: ${DATA_DIR}
+      CAMERA_SERVICE_URL: http://camera:8001
+    volumes:
+      - /data:/data
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  camera:
+    build:
+      context: ./services/camera
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    privileged: true
+    ipc: host
+    environment:
+      ZED_SERIAL_ON_AXIS: ${ZED_SERIAL_ON_AXIS}
+      ZED_SERIAL_OFF_AXIS: ${ZED_SERIAL_OFF_AXIS}
+      DATA_DIR: ${DATA_DIR}
+      CAMERA_HOST: ${CAMERA_HOST}
+      CAMERA_PORT: ${CAMERA_PORT}
+    volumes:
+      - /data:/data
+      - /tmp/argus_socket:/tmp/argus_socket
+      - /dev:/dev
+      - /usr/lib/aarch64-linux-gnu/tegra:/usr/lib/aarch64-linux-gnu/tegra
+      - /usr/local/zed:/usr/local/zed
+    ports:
+      - "8001:8001"
+
+  grader:
+    build:
+      context: ./services/grader
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    runtime: nvidia
+    environment:
+      REDIS_URL: ${REDIS_URL}
+      DATABASE_URL: ${DATABASE_URL}
+      DATA_DIR: ${DATA_DIR}
+    volumes:
+      - /data:/data
+      - /usr/local/zed:/usr/local/zed
+    depends_on:
+      redis:
+        condition: service_healthy
+      db:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ./services/frontend
+      dockerfile: Dockerfile
+    volumes:
+      - frontend_dist:/app/dist
+
+  nginx:
+    image: nginx:1.25-bookworm
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    volumes:
+      - ./services/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - frontend_dist:/usr/share/nginx/html:ro
+    depends_on:
+      api:
+        condition: service_started
+      camera:
+        condition: service_started
+      frontend:
+        condition: service_completed_successfully
+
+volumes:
+  frontend_dist:

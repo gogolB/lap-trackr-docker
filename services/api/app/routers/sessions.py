@@ -1,0 +1,210 @@
+import json
+import shutil
+from datetime import datetime, timezone
+from pathlib import Path
+from uuid import UUID
+
+import httpx
+import redis.asyncio as redis
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
+
+from app.core.auth import get_current_user
+from app.core.config import settings
+from app.core.database import get_db
+from app.models.models import Session, SessionStatus, User
+from app.schemas.schemas import SessionDetailOut, SessionOut
+
+router = APIRouter(prefix="/sessions", tags=["sessions"])
+
+
+@router.get("/", response_model=list[SessionOut])
+async def list_sessions(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(
+        select(Session)
+        .where(Session.user_id == current_user.id)
+        .order_by(Session.created_at.desc())
+    )
+    return result.scalars().all()
+
+
+@router.get("/{session_id}", response_model=SessionDetailOut)
+async def get_session(
+    session_id: UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(
+        select(Session)
+        .options(selectinload(Session.grading_result))
+        .where(Session.id == session_id, Session.user_id == current_user.id)
+    )
+    session = result.scalar_one_or_none()
+    if session is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Session not found"
+        )
+    return session
+
+
+@router.post("/start", response_model=SessionOut, status_code=status.HTTP_201_CREATED)
+async def start_session(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    now = datetime.now(timezone.utc)
+    timestamp = now.strftime("%Y-%m-%d_%H-%M-%S")
+    session_dir = str(
+        Path(settings.DATA_DIR) / "users" / str(current_user.id) / timestamp
+    )
+
+    session = Session(
+        user_id=current_user.id,
+        started_at=now,
+        status=SessionStatus.recording,
+    )
+    db.add(session)
+    await db.commit()
+    await db.refresh(session)
+
+    # Create the session directory on disk
+    Path(session_dir).mkdir(parents=True, exist_ok=True)
+
+    # Call the camera service to start recording
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.post(
+                f"{settings.CAMERA_SERVICE_URL}/record/start",
+                json={"session_dir": session_dir},
+            )
+            resp.raise_for_status()
+            camera_data = resp.json()
+
+        session.on_axis_path = camera_data.get("on_axis_path")
+        session.off_axis_path = camera_data.get("off_axis_path")
+        await db.commit()
+        await db.refresh(session)
+
+    except Exception:
+        session.status = SessionStatus.failed
+        await db.commit()
+        await db.refresh(session)
+
+    return session
+
+
+@router.post("/{session_id}/stop", response_model=SessionOut)
+async def stop_session(
+    session_id: UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(
+        select(Session).where(
+            Session.id == session_id, Session.user_id == current_user.id
+        )
+    )
+    session = result.scalar_one_or_none()
+    if session is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Session not found"
+        )
+    if session.status != SessionStatus.recording:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Session is not recording (current status: {session.status.value})",
+        )
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.post(f"{settings.CAMERA_SERVICE_URL}/record/stop")
+            resp.raise_for_status()
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Failed to contact camera service to stop recording",
+        )
+
+    session.status = SessionStatus.completed
+    session.stopped_at = datetime.now(timezone.utc)
+    await db.commit()
+    await db.refresh(session)
+    return session
+
+
+@router.delete("/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_session(
+    session_id: UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(
+        select(Session).where(
+            Session.id == session_id, Session.user_id == current_user.id
+        )
+    )
+    session = result.scalar_one_or_none()
+    if session is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Session not found"
+        )
+
+    # Remove session files from disk
+    if session.on_axis_path:
+        session_dir = str(Path(session.on_axis_path).parent)
+        if Path(session_dir).exists():
+            shutil.rmtree(session_dir, ignore_errors=True)
+
+    await db.delete(session)
+    await db.commit()
+
+
+@router.post("/{session_id}/grade", response_model=SessionOut)
+async def grade_session(
+    session_id: UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(
+        select(Session).where(
+            Session.id == session_id, Session.user_id == current_user.id
+        )
+    )
+    session = result.scalar_one_or_none()
+    if session is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Session not found"
+        )
+    if session.status != SessionStatus.completed:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Session must be completed before grading (current status: {session.status.value})",
+        )
+
+    job_payload = json.dumps(
+        {
+            "session_id": str(session.id),
+            "on_axis_path": session.on_axis_path,
+            "off_axis_path": session.off_axis_path,
+        }
+    )
+
+    try:
+        r = redis.from_url(settings.REDIS_URL)
+        await r.lpush("grading_jobs", job_payload)
+        await r.aclose()
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Failed to enqueue grading job",
+        )
+
+    session.status = SessionStatus.grading
+    await db.commit()
+    await db.refresh(session)
+    return session
