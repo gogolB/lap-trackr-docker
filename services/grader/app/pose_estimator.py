@@ -13,7 +13,7 @@ from typing import Any, List
 import numpy as np
 
 from app.config import CAMERA_CX, CAMERA_CY, CAMERA_FX, CAMERA_FY, DEFAULT_FPS
-from app.detector import Detection
+from app.backends.base import Detection
 
 logger = logging.getLogger("grader.pose_estimator")
 

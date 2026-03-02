@@ -41,11 +41,18 @@ services:
       JWT_EXPIRY_MINUTES: ${JWT_EXPIRY_MINUTES}
       REDIS_URL: ${REDIS_URL}
       DATA_DIR: ${DATA_DIR}
+      MODELS_DIR: ${MODELS_DIR:-/data/models}
       CAMERA_SERVICE_URL: http://camera:8001
     volumes:
       - /data:/data
     ports:
       - "8000:8000"
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health')\""]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
     depends_on:
       db:
         condition: service_healthy
@@ -58,6 +65,7 @@ services:
       dockerfile: Dockerfile
     restart: unless-stopped
     privileged: true
+    runtime: nvidia
     ipc: host
     environment:
       ZED_SERIAL_ON_AXIS: ${ZED_SERIAL_ON_AXIS}
@@ -67,12 +75,19 @@ services:
       CAMERA_PORT: ${CAMERA_PORT}
     volumes:
       - /data:/data
-      - /tmp/argus_socket:/tmp/argus_socket
+      - /tmp:/tmp
       - /dev:/dev
+      - /var/nvidia/nvcam/settings:/var/nvidia/nvcam/settings
       - /usr/lib/aarch64-linux-gnu/tegra:/usr/lib/aarch64-linux-gnu/tegra
       - /usr/local/zed:/usr/local/zed
     ports:
       - "8001:8001"
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8001/health')\""]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
 
   grader:
     build:
@@ -84,6 +99,7 @@ services:
       REDIS_URL: ${REDIS_URL}
       DATABASE_URL: ${DATABASE_URL}
       DATA_DIR: ${DATA_DIR}
+      MODELS_DIR: ${MODELS_DIR:-/data/models}
     volumes:
       - /data:/data
       - /usr/local/zed:/usr/local/zed
@@ -110,9 +126,9 @@ services:
       - frontend_dist:/usr/share/nginx/html:ro
     depends_on:
       api:
-        condition: service_started
+        condition: service_healthy
       camera:
-        condition: service_started
+        condition: service_healthy
       frontend:
         condition: service_completed_successfully
 

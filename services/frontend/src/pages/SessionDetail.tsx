@@ -378,8 +378,8 @@ export default function SessionDetail() {
                       color: "#f1f5f9",
                       fontSize: "0.875rem",
                     }}
-                    formatter={(value: number, _name: string, props: { payload: { unit: string } }) => [
-                      `${value.toFixed(2)} ${props.payload.unit}`,
+                    formatter={(value: number, _name: string, props: { payload?: { unit?: string } }) => [
+                      `${value.toFixed(2)} ${props.payload?.unit ?? ""}`,
                       "Value",
                     ]}
                   />

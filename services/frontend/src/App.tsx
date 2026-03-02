@@ -9,6 +9,7 @@ import Dashboard from "./pages/Dashboard";
 import LiveView from "./pages/LiveView";
 import SessionList from "./pages/SessionList";
 import SessionDetail from "./pages/SessionDetail";
+import ModelsPage from "./pages/ModelsPage";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -41,6 +42,7 @@ export default function App() {
               <Route path="/live" element={<LiveView />} />
               <Route path="/sessions" element={<SessionList />} />
               <Route path="/sessions/:id" element={<SessionDetail />} />
+              <Route path="/models" element={<ModelsPage />} />
             </Route>
 
             {/* Fallback */}

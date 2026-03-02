@@ -1,5 +1,8 @@
+from __future__ import annotations
+
 import time
 from contextlib import asynccontextmanager
+from typing import Optional
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
@@ -38,8 +41,8 @@ class RecordStartRequest(BaseModel):
 
 
 class RecordStartResponse(BaseModel):
-    on_axis_path: str | None = None
-    off_axis_path: str | None = None
+    on_axis_path: Optional[str] = None
+    off_axis_path: Optional[str] = None
 
 
 class RecordStopResponse(BaseModel):
@@ -49,6 +52,11 @@ class RecordStopResponse(BaseModel):
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
+
+@app.get("/health")
+def health():
+    return {"status": "ok"}
+
 
 @app.get("/status")
 def get_status():

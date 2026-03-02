@@ -14,6 +14,8 @@ from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import (
+    BigInteger,
+    Boolean,
     Column,
     DateTime,
     Float,
@@ -66,6 +68,25 @@ sessions_table = Table(
     # Other columns exist but are not needed by the worker.
 )
 
+ml_models_table = Table(
+    "ml_models",
+    metadata,
+    Column("id", UUID(as_uuid=True), primary_key=True),
+    Column("slug", String(64), unique=True, nullable=False),
+    Column("name", String(255), nullable=False),
+    Column("model_type", String(32), nullable=False),
+    Column("description", Text, nullable=True),
+    Column("version", String(64), nullable=True),
+    Column("download_url", Text, nullable=True),
+    Column("file_size_bytes", BigInteger, nullable=True),
+    Column("file_path", Text, nullable=True),
+    Column("status", String(32), nullable=False),
+    Column("is_active", Boolean, default=False),
+    Column("is_custom", Boolean, default=False),
+    Column("created_at", DateTime(timezone=True), nullable=True),
+    Column("updated_at", DateTime(timezone=True), nullable=True),
+)
+
 grading_results_table = Table(
     "grading_results",
     metadata,
@@ -104,6 +125,23 @@ def _get_session_dir(session_id: str) -> str | None:
     if row and row[0]:
         return os.path.dirname(row[0])
     return None
+
+
+def get_active_model_info() -> dict[str, Any] | None:
+    """Return info about the currently active ML model, or None."""
+    engine = _get_engine()
+    with engine.begin() as conn:
+        row = conn.execute(
+            ml_models_table.select().where(ml_models_table.c.is_active == True)  # noqa: E712
+        ).first()
+    if row is None:
+        return None
+    return {
+        "id": row.id,
+        "slug": row.slug,
+        "model_type": row.model_type,
+        "file_path": row.file_path,
+    }
 
 
 def update_session_status(session_id: str, status: str) -> None:

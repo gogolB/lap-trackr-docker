@@ -8,6 +8,7 @@ class Settings(BaseSettings):
     JWT_EXPIRY_MINUTES: int = 60
     REDIS_URL: str = "redis://redis:6379/0"
     DATA_DIR: str = "/data"
+    MODELS_DIR: str = "/data/models"
     CAMERA_SERVICE_URL: str = "http://camera:8001"
 
     class Config:

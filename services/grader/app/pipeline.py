@@ -5,8 +5,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from app.detector import detect_instruments
 from app.metrics import calculate_metrics
+from app.model_loader import get_backend
 from app.pose_estimator import estimate_poses
 from app.svo_loader import load_svo2
 
@@ -47,9 +47,10 @@ def run_pipeline(job: dict) -> dict[str, Any]:
     off_frames, off_depth, off_fps = load_svo2(off_axis_path)
     logger.info("  Off-axis: %d frames at %.1f fps", len(off_frames), off_fps)
 
-    # Stage 2 -- instrument detection (placeholder).
+    # Stage 2 -- instrument detection via active model backend.
     logger.info("Stage 2: Running instrument detection on %d frames", len(frames))
-    detections = detect_instruments(frames)
+    backend = get_backend()
+    detections = backend.detect(frames)
     logger.info("  Detections generated for %d frames", len(detections))
 
     # Stage 3 -- 3D pose estimation from detections + depth.

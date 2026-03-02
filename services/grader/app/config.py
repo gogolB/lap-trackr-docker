@@ -18,6 +18,7 @@ DATABASE_URL: str = (
 )
 
 DATA_DIR: str = os.environ.get("DATA_DIR", "/data")
+MODELS_DIR: str = os.environ.get("MODELS_DIR", "/data/models")
 
 # SVO2 loader settings
 FRAME_SAMPLE_INTERVAL: int = int(os.environ.get("FRAME_SAMPLE_INTERVAL", "5"))

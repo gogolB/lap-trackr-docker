@@ -16,6 +16,7 @@ export default function Layout() {
     { to: "/", label: "Dashboard" },
     { to: "/live", label: "Live View" },
     { to: "/sessions", label: "Sessions" },
+    { to: "/models", label: "Models" },
   ];
 
   return (

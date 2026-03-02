@@ -193,6 +193,90 @@ export async function getPoses(sessionId: string): Promise<PoseData[]> {
   return request<PoseData[]>(`/api/results/${sessionId}/poses`);
 }
 
+// ---- ML Models ----
+
+export type ModelStatus =
+  | "available"
+  | "downloading"
+  | "ready"
+  | "active"
+  | "custom"
+  | "failed";
+
+export interface MLModel {
+  id: string;
+  slug: string;
+  name: string;
+  model_type: string;
+  description: string | null;
+  version: string | null;
+  download_url: string | null;
+  file_size_bytes: number | null;
+  file_path: string | null;
+  status: ModelStatus;
+  is_active: boolean;
+  is_custom: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ModelDownloadProgress {
+  model_id: string;
+  status: string;
+  downloaded_bytes: number;
+  total_bytes: number;
+  percent: number;
+  error: string | null;
+}
+
+export async function getModels(): Promise<MLModel[]> {
+  return request<MLModel[]>("/api/models/");
+}
+
+export async function downloadModel(id: string): Promise<MLModel> {
+  return request<MLModel>(`/api/models/${id}/download`, { method: "POST" });
+}
+
+export async function getModelProgress(
+  id: string
+): Promise<ModelDownloadProgress> {
+  return request<ModelDownloadProgress>(`/api/models/${id}/progress`);
+}
+
+export async function activateModel(id: string): Promise<MLModel> {
+  return request<MLModel>(`/api/models/${id}/activate`, { method: "POST" });
+}
+
+export async function deleteModel(id: string): Promise<void> {
+  return request<void>(`/api/models/${id}`, { method: "DELETE" });
+}
+
+export async function uploadModel(file: File): Promise<MLModel> {
+  const token = getToken();
+  const formData = new FormData();
+  formData.append("file", file);
+
+  const headers: Record<string, string> = {};
+  if (token) {
+    headers["Authorization"] = `Bearer ${token}`;
+  }
+
+  const response = await fetch(`${BASE_URL}/api/models/upload`, {
+    method: "POST",
+    headers,
+    body: formData,
+  });
+
+  if (!response.ok) {
+    const errorBody = await response.text().catch(() => "");
+    throw new Error(
+      `API Error ${response.status}: ${errorBody || response.statusText}`
+    );
+  }
+
+  return response.json();
+}
+
 // ---- Token utilities exposed for auth hook ----
 
 export { getToken, setToken, clearToken };

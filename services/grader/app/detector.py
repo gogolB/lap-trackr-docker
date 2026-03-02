@@ -17,7 +17,7 @@ import numpy as np
 logger = logging.getLogger("grader.detector")
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class Detection:
     """A single 2D instrument-tip detection in pixel coordinates."""
 

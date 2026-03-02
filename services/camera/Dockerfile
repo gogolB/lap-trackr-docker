@@ -1,4 +1,4 @@
-FROM stereolabs/zed:4.1-py-runtime-jetson-jp5.1.2
+FROM stereolabs/zed:5.2-py-runtime-jetson-jp5.1.2
 
 WORKDIR /app
 

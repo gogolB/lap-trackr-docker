@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import os
 import threading
 import time
@@ -48,7 +50,7 @@ class CameraManager:
                 continue
             cam = sl.Camera()
             init_params = sl.InitParameters()
-            init_params.camera_resolution = sl.RESOLUTION.HD720
+            init_params.camera_resolution = sl.RESOLUTION.HD1200
             init_params.camera_fps = 30
             init_params.depth_mode = sl.DEPTH_MODE.NONE
             init_params.set_from_serial_number(int(serial))

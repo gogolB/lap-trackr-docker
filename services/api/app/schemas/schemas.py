@@ -3,7 +3,7 @@ from uuid import UUID
 
 from pydantic import BaseModel
 
-from app.models.models import SessionStatus
+from app.models.models import ModelStatus, SessionStatus
 
 
 # ── Auth ──────────────────────────────────────────────────────────────
@@ -68,3 +68,36 @@ class SessionOut(BaseModel):
 
 class SessionDetailOut(SessionOut):
     grading_result: GradingResultOut | None = None
+
+
+# ── ML Models ───────────────────────────────────────────────────────
+
+
+class MLModelOut(BaseModel):
+    id: UUID
+    slug: str
+    name: str
+    model_type: str
+    description: str | None = None
+    version: str | None = None
+    download_url: str | None = None
+    file_size_bytes: int | None = None
+    file_path: str | None = None
+    status: ModelStatus
+    is_active: bool = False
+    is_custom: bool = False
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = {"from_attributes": True, "protected_namespaces": ()}
+
+
+class MLModelDownloadProgress(BaseModel):
+    model_id: UUID
+    status: str
+    downloaded_bytes: int = 0
+    total_bytes: int = 0
+    percent: float = 0.0
+    error: str | None = None
+
+    model_config = {"protected_namespaces": ()}
