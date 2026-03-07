@@ -137,7 +137,10 @@ async def start_session(
         logger.exception("Camera start failed")
         session.status = SessionStatus.failed
         await db.commit()
-        await db.refresh(session)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Camera start failed",
+        )
 
     return session
 
@@ -184,14 +187,15 @@ async def stop_session(
             "off_axis_path": session.off_axis_path,
         }
     )
+    r = redis.from_url(settings.REDIS_URL)
     try:
-        r = redis.from_url(settings.REDIS_URL)
         await r.lpush("export_jobs", export_job)
-        await r.aclose()
         session.status = SessionStatus.exporting
     except Exception:
         logger.warning("Failed to enqueue export job, setting status to export_failed")
         session.status = SessionStatus.export_failed
+    finally:
+        await r.aclose()
 
     await db.commit()
     await db.refresh(session)
@@ -280,15 +284,16 @@ async def grade_session(
         }
     )
 
+    r = redis.from_url(settings.REDIS_URL)
     try:
-        r = redis.from_url(settings.REDIS_URL)
         await r.lpush("grading_jobs", job_payload)
-        await r.aclose()
     except Exception:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="Failed to enqueue grading job",
         )
+    finally:
+        await r.aclose()
 
     session.status = SessionStatus.grading
     await db.commit()

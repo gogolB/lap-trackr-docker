@@ -103,6 +103,12 @@ def list_cameras():
 @app.post("/record/start", response_model=RecordStartResponse)
 def record_start(body: RecordStartRequest):
     """Start SVO2 recording on every open camera."""
+    import os
+    from pathlib import Path
+    data_dir = os.environ.get("DATA_DIR", "/data")
+    resolved = Path(body.session_dir).resolve()
+    if not str(resolved).startswith(str(Path(data_dir).resolve())):
+        raise HTTPException(status_code=400, detail="Invalid session directory")
     try:
         paths = manager.start_recording(body.session_dir)
     except RuntimeError as exc:

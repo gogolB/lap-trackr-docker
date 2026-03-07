@@ -54,16 +54,21 @@ class TAPIRBackend(ModelBackend):
             if torch.cuda.is_available():
                 video_tensor = video_tensor.cuda()
 
-            # Initialize two query points near typical instrument positions
-            query_points = torch.tensor([
-                [0, height * 0.5, width * 0.35],  # frame 0, left instrument
-                [0, height * 0.5, width * 0.65],  # frame 0, right instrument
-            ]).unsqueeze(0).float()
+            # Use provided query points or fall back to defaults
+            if query_points is not None:
+                qp = torch.from_numpy(np.asarray(query_points)).float()
+                if qp.dim() == 2:
+                    qp = qp.unsqueeze(0)  # (N, 3) -> (1, N, 3)
+            else:
+                qp = torch.tensor([
+                    [0, height * 0.5, width * 0.35],  # frame 0, left instrument
+                    [0, height * 0.5, width * 0.65],  # frame 0, right instrument
+                ]).unsqueeze(0).float()
             if torch.cuda.is_available():
-                query_points = query_points.cuda()
+                qp = qp.cuda()
 
             with torch.no_grad():
-                output = self._model(video_tensor, query_points)
+                output = self._model(video_tensor, qp)
 
             # output expected: tracks (1, T, N, 2), occlusion (1, T, N)
             tracks = output["tracks"][0].cpu().numpy()  # (T, N, 2)

@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 from uuid import UUID
 
+import aiofiles
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -82,8 +83,8 @@ async def get_metrics(
         )
 
     try:
-        with open(metrics_path, "r") as f:
-            return json.load(f)
+        async with aiofiles.open(metrics_path, "r") as f:
+            return json.loads(await f.read())
     except json.JSONDecodeError:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -113,8 +114,8 @@ async def get_poses(
         )
 
     try:
-        with open(poses_path, "r") as f:
-            return json.load(f)
+        async with aiofiles.open(poses_path, "r") as f:
+            return json.loads(await f.read())
     except json.JSONDecodeError:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,

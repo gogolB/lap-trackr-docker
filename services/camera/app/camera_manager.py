@@ -77,41 +77,49 @@ class CameraManager:
                     f"(serial {serial}): {status}"
                 )
                 continue
-            self.cameras[name] = cam
-            self._locks[name] = threading.Lock()
-            self._latest_images[name] = sl.Mat()
-            self._streaming_mats[name] = sl.Mat()
-
-            # Extract factory-calibrated intrinsics from the ZED SDK
             try:
-                cam_info = cam.get_camera_information()
-                calib = cam_info.camera_configuration.calibration_parameters
-                left = calib.left_cam
-                res = cam_info.camera_configuration.resolution
-                self._intrinsics[name] = {
-                    "fx": float(left.fx),
-                    "fy": float(left.fy),
-                    "cx": float(left.cx),
-                    "cy": float(left.cy),
-                    "distortion": [float(d) for d in left.disto],
-                    "image_width": int(res.width),
-                    "image_height": int(res.height),
-                }
-                self._camera_info[name] = {
-                    "serial": serial,
-                    "resolution": [int(res.width), int(res.height)],
-                    "fps": 30,
-                }
-                print(
-                    f"[camera_manager] {name} intrinsics: "
-                    f"fx={left.fx:.1f} fy={left.fy:.1f} "
-                    f"cx={left.cx:.1f} cy={left.cy:.1f} "
-                    f"res={res.width}x{res.height}"
-                )
-            except Exception as exc:
-                print(f"[camera_manager] Warning: could not extract intrinsics for {name}: {exc}")
+                self.cameras[name] = cam
+                self._locks[name] = threading.Lock()
+                self._latest_images[name] = sl.Mat()
+                self._streaming_mats[name] = sl.Mat()
 
-            print(f"[camera_manager] Opened {name} (serial {serial})")
+                # Extract factory-calibrated intrinsics from the ZED SDK
+                try:
+                    cam_info = cam.get_camera_information()
+                    calib = cam_info.camera_configuration.calibration_parameters
+                    left = calib.left_cam
+                    res = cam_info.camera_configuration.resolution
+                    self._intrinsics[name] = {
+                        "fx": float(left.fx),
+                        "fy": float(left.fy),
+                        "cx": float(left.cx),
+                        "cy": float(left.cy),
+                        "distortion": [float(d) for d in left.disto],
+                        "image_width": int(res.width),
+                        "image_height": int(res.height),
+                    }
+                    self._camera_info[name] = {
+                        "serial": serial,
+                        "resolution": [int(res.width), int(res.height)],
+                        "fps": 30,
+                    }
+                    print(
+                        f"[camera_manager] {name} intrinsics: "
+                        f"fx={left.fx:.1f} fy={left.fy:.1f} "
+                        f"cx={left.cx:.1f} cy={left.cy:.1f} "
+                        f"res={res.width}x{res.height}"
+                    )
+                except Exception as exc:
+                    print(f"[camera_manager] Warning: could not extract intrinsics for {name}: {exc}")
+
+                print(f"[camera_manager] Opened {name} (serial {serial})")
+            except Exception as exc:
+                print(f"[camera_manager] Error setting up {name}, closing: {exc}")
+                cam.close()
+                self.cameras.pop(name, None)
+                self._locks.pop(name, None)
+                self._latest_images.pop(name, None)
+                self._streaming_mats.pop(name, None)
 
     def close(self) -> None:
         """Stop any active recording and close every camera."""
@@ -124,6 +132,7 @@ class CameraManager:
             self.cameras.clear()
             self._locks.clear()
             self._latest_images.clear()
+            self._streaming_mats.clear()
         if self._grab_thread is not None and self._grab_thread.is_alive():
             print("[camera_manager] WARNING: grab thread still alive after close")
 
@@ -156,6 +165,7 @@ class CameraManager:
 
         if serials_changed and not self.recording:
             print(f"[camera_manager] Serial change detected, re-opening cameras")
+            self._stop_grab_thread()
             with self._camera_lock:
                 self.close()
                 self.serials["on_axis"] = new_on

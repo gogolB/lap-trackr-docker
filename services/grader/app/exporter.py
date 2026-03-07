@@ -48,94 +48,100 @@ def export_svo2(svo2_path: str) -> dict:
     if status != sl.ERROR_CODE.SUCCESS:
         raise RuntimeError(f"Failed to open SVO2 '{svo2_path}': {status}")
 
-    info = zed.get_camera_information()
-    w = int(info.camera_configuration.resolution.width)
-    h = int(info.camera_configuration.resolution.height)
-    fps = int(info.camera_configuration.fps)
-    if fps <= 0:
-        fps = 30
+    writer = None
+    tmp_dir = session_dir / f".{cam_name}_depth_tmp"
+    try:
+        info = zed.get_camera_information()
+        w = int(info.camera_configuration.resolution.width)
+        h = int(info.camera_configuration.resolution.height)
+        fps = int(info.camera_configuration.fps)
+        if fps <= 0:
+            fps = 30
 
-    writer = cv2.VideoWriter(
-        str(mp4_path),
-        cv2.VideoWriter_fourcc(*"avc1"),
-        fps,
-        (w, h),
-    )
-    if not writer.isOpened():
-        # Fallback codec if avc1 is unavailable
         writer = cv2.VideoWriter(
             str(mp4_path),
-            cv2.VideoWriter_fourcc(*"mp4v"),
+            cv2.VideoWriter_fourcc(*"avc1"),
             fps,
             (w, h),
         )
+        if not writer.isOpened():
+            # Fallback codec if avc1 is unavailable
+            writer = cv2.VideoWriter(
+                str(mp4_path),
+                cv2.VideoWriter_fourcc(*"mp4v"),
+                fps,
+                (w, h),
+            )
 
-    image = sl.Mat()
-    depth = sl.Mat()
+        image = sl.Mat()
+        depth = sl.Mat()
 
-    depth_arrays: dict[str, np.ndarray] = {}
-    frame_idx = 0
-    chunk_idx = 0
-    tmp_dir = session_dir / f".{cam_name}_depth_tmp"
+        depth_arrays: dict[str, np.ndarray] = {}
+        frame_idx = 0
+        chunk_idx = 0
 
-    runtime = sl.RuntimeParameters()
+        runtime = sl.RuntimeParameters()
 
-    while zed.grab(runtime) == sl.ERROR_CODE.SUCCESS:
-        zed.retrieve_image(image, sl.VIEW.LEFT)
-        zed.retrieve_measure(depth, sl.MEASURE.DEPTH)
+        while zed.grab(runtime) == sl.ERROR_CODE.SUCCESS:
+            zed.retrieve_image(image, sl.VIEW.LEFT)
+            zed.retrieve_measure(depth, sl.MEASURE.DEPTH)
 
-        bgr = image.get_data()[:, :, :3].copy()
-        writer.write(bgr)
+            bgr = image.get_data()[:, :, :3].copy()
+            writer.write(bgr)
 
-        depth_arr = depth.get_data().copy().astype(np.float16)
-        depth_arrays[f"frame_{frame_idx:06d}"] = depth_arr
-        frame_idx += 1
+            depth_arr = depth.get_data().copy().astype(np.float16)
+            depth_arrays[f"frame_{frame_idx:06d}"] = depth_arr
+            frame_idx += 1
 
-        # Flush to disk every 100 frames to manage memory
-        if len(depth_arrays) >= 100:
-            tmp_dir.mkdir(parents=True, exist_ok=True)
-            chunk_path = tmp_dir / f"chunk_{chunk_idx:04d}.npz"
-            np.savez_compressed(str(chunk_path), **depth_arrays)
-            depth_arrays.clear()
-            chunk_idx += 1
+            # Flush to disk every 100 frames to manage memory
+            if len(depth_arrays) >= 100:
+                tmp_dir.mkdir(parents=True, exist_ok=True)
+                chunk_path = tmp_dir / f"chunk_{chunk_idx:04d}.npz"
+                np.savez_compressed(str(chunk_path), **depth_arrays)
+                depth_arrays.clear()
+                chunk_idx += 1
 
-    # Flush remaining
-    if depth_arrays:
+        # Flush remaining
+        if depth_arrays:
+            if chunk_idx > 0:
+                tmp_dir.mkdir(parents=True, exist_ok=True)
+                chunk_path = tmp_dir / f"chunk_{chunk_idx:04d}.npz"
+                np.savez_compressed(str(chunk_path), **depth_arrays)
+                depth_arrays.clear()
+                chunk_idx += 1
+            else:
+                # Small session, write directly
+                np.savez_compressed(str(npz_path), **depth_arrays)
+                depth_arrays.clear()
+
+        # If we wrote chunks, merge into a single NPZ
         if chunk_idx > 0:
-            tmp_dir.mkdir(parents=True, exist_ok=True)
-            chunk_path = tmp_dir / f"chunk_{chunk_idx:04d}.npz"
-            np.savez_compressed(str(chunk_path), **depth_arrays)
-            depth_arrays.clear()
-            chunk_idx += 1
-        else:
-            # Small session, write directly
-            np.savez_compressed(str(npz_path), **depth_arrays)
-            depth_arrays.clear()
+            _merge_chunks(tmp_dir, npz_path, chunk_idx)
 
-    writer.release()
-    zed.close()
+        logger.info(
+            "Exported %s: %d frames → %s + %s",
+            svo2_path,
+            frame_idx,
+            mp4_path,
+            npz_path,
+        )
 
-    # If we wrote chunks, merge into a single NPZ
-    if chunk_idx > 0:
-        _merge_chunks(tmp_dir, npz_path, chunk_idx)
+        # Extract sample frames (first, middle, last)
+        sample_paths = _extract_sample_frames(str(mp4_path), session_dir, cam_name, frame_idx)
 
-    logger.info(
-        "Exported %s: %d frames → %s + %s",
-        svo2_path,
-        frame_idx,
-        mp4_path,
-        npz_path,
-    )
-
-    # Extract sample frames (first, middle, last)
-    sample_paths = _extract_sample_frames(str(mp4_path), session_dir, cam_name, frame_idx)
-
-    return {
-        "mp4_path": str(mp4_path),
-        "npz_path": str(npz_path),
-        "frame_count": frame_idx,
-        "sample_paths": sample_paths,
-    }
+        return {
+            "mp4_path": str(mp4_path),
+            "npz_path": str(npz_path),
+            "frame_count": frame_idx,
+            "sample_paths": sample_paths,
+        }
+    finally:
+        if writer is not None:
+            writer.release()
+        zed.close()
+        if tmp_dir.exists():
+            import shutil
+            shutil.rmtree(str(tmp_dir), ignore_errors=True)
 
 
 def _extract_sample_frames(
@@ -150,27 +156,29 @@ def _extract_sample_frames(
         logger.warning("Cannot open %s for sample frame extraction", mp4_path)
         return []
 
-    # Frame indices: first, middle, last
-    indices = [0]
-    if total_frames > 1:
-        indices.append(total_frames // 2)
-    if total_frames > 2:
-        indices.append(total_frames - 1)
+    try:
+        # Frame indices: first, middle, last
+        indices = [0]
+        if total_frames > 1:
+            indices.append(total_frames // 2)
+        if total_frames > 2:
+            indices.append(total_frames - 1)
 
-    sample_paths: list[str] = []
-    for i, frame_idx in enumerate(indices):
-        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
-        ret, bgr = cap.read()
-        if not ret:
-            continue
-        filename = f"{cam_name}_sample_{i}.jpg"
-        out_path = session_dir / filename
-        cv2.imwrite(str(out_path), bgr, [cv2.IMWRITE_JPEG_QUALITY, 90])
-        sample_paths.append(str(out_path))
+        sample_paths: list[str] = []
+        for i, frame_idx in enumerate(indices):
+            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+            ret, bgr = cap.read()
+            if not ret:
+                continue
+            filename = f"{cam_name}_sample_{i}.jpg"
+            out_path = session_dir / filename
+            cv2.imwrite(str(out_path), bgr, [cv2.IMWRITE_JPEG_QUALITY, 90])
+            sample_paths.append(str(out_path))
 
-    cap.release()
-    logger.info("Extracted %d sample frames for %s", len(sample_paths), cam_name)
-    return sample_paths
+        logger.info("Extracted %d sample frames for %s", len(sample_paths), cam_name)
+        return sample_paths
+    finally:
+        cap.release()
 
 
 def _merge_chunks(tmp_dir: Path, npz_path: Path, num_chunks: int) -> None:

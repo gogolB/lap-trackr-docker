@@ -144,47 +144,50 @@ def _try_load_from_exports(
         logger.warning("Failed to open MP4 %s", mp4_path)
         return None
 
-    fps = cap.get(cv2.CAP_PROP_FPS)
-    if fps <= 0:
-        fps = 30.0
+    depth_data = None
+    try:
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        if fps <= 0:
+            fps = 30.0
 
-    # Load depth arrays
-    depth_data = np.load(str(npz_path))
-    depth_keys = sorted(depth_data.files)
+        # Load depth arrays
+        depth_data = np.load(str(npz_path))
+        depth_keys = sorted(depth_data.files)
 
-    frames: list[np.ndarray] = []
-    depth_maps: list[np.ndarray] = []
-    frame_idx = 0
+        frames: list[np.ndarray] = []
+        depth_maps: list[np.ndarray] = []
+        frame_idx = 0
 
-    while True:
-        ret, bgr = cap.read()
-        if not ret:
-            break
+        while True:
+            ret, bgr = cap.read()
+            if not ret:
+                break
 
-        if frame_idx % sample_interval == 0:
-            frames.append(bgr.copy())
-            key = f"frame_{frame_idx:06d}"
-            if key in depth_data:
-                depth_maps.append(depth_data[key].astype(np.float32))
-            elif frame_idx < len(depth_keys):
-                depth_maps.append(depth_data[depth_keys[frame_idx]].astype(np.float32))
-            else:
-                # No depth for this frame, use zeros
-                h, w = bgr.shape[:2]
-                depth_maps.append(np.zeros((h, w), dtype=np.float32))
+            if frame_idx % sample_interval == 0:
+                frames.append(bgr.copy())
+                key = f"frame_{frame_idx:06d}"
+                if key in depth_data:
+                    depth_maps.append(depth_data[key].astype(np.float32))
+                elif frame_idx < len(depth_keys):
+                    depth_maps.append(depth_data[depth_keys[frame_idx]].astype(np.float32))
+                else:
+                    # No depth for this frame, use zeros
+                    h, w = bgr.shape[:2]
+                    depth_maps.append(np.zeros((h, w), dtype=np.float32))
 
-        frame_idx += 1
+            frame_idx += 1
 
-    cap.release()
-    depth_data.close()
-
-    logger.info(
-        "Loaded %d / %d frames from exports (sample_interval=%d)",
-        len(frames),
-        frame_idx,
-        sample_interval,
-    )
-    return frames, depth_maps, fps
+        logger.info(
+            "Loaded %d / %d frames from exports (sample_interval=%d)",
+            len(frames),
+            frame_idx,
+            sample_interval,
+        )
+        return frames, depth_maps, fps
+    finally:
+        cap.release()
+        if depth_data is not None:
+            depth_data.close()
 
 
 # ---------------------------------------------------------------------------

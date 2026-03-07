@@ -6,6 +6,7 @@ import asyncio
 import logging
 import os
 import shutil
+from pathlib import Path
 import uuid
 
 import aiofiles
@@ -56,9 +57,9 @@ async def _download_model(model_id: str, url: str, dest: str) -> None:
                 total = int(resp.headers.get("content-length", 0))
                 downloaded = 0
 
-                with open(dest, "wb") as f:
+                async with aiofiles.open(dest, "wb") as f:
                     async for chunk in resp.aiter_bytes(chunk_size=1024 * 256):
-                        f.write(chunk)
+                        await f.write(chunk)
                         downloaded += len(chunk)
                         pct = (downloaded / total * 100) if total else 0
                         await r.hset(key, mapping={
@@ -173,7 +174,10 @@ async def activate_model(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    model = await db.get(MLModel, model_id)
+    result = await db.execute(
+        select(MLModel).where(MLModel.id == model_id).with_for_update()
+    )
+    model = result.scalar_one_or_none()
     if not model:
         raise HTTPException(404, "Model not found")
     if model.status not in (ModelStatus.ready, ModelStatus.active, ModelStatus.custom):
@@ -238,7 +242,11 @@ async def upload_model(
     if len(file.filename) > 200:
         raise HTTPException(400, "Filename too long (max 200 characters)")
 
-    slug = f"custom-{file.filename.replace('.pt', '').replace(' ', '-').lower()}"
+    safe_filename = Path(file.filename).name
+    if not safe_filename or ".." in safe_filename:
+        raise HTTPException(400, "Invalid filename")
+
+    slug = f"custom-{safe_filename.replace('.pt', '').replace(' ', '-').lower()}"
 
     # Check for duplicate slug
     existing = await db.execute(select(MLModel).where(MLModel.slug == slug))
@@ -247,7 +255,11 @@ async def upload_model(
 
     dest_dir = os.path.join(MODELS_DIR, "custom", slug)
     os.makedirs(dest_dir, exist_ok=True)
-    dest = os.path.join(dest_dir, file.filename)
+    dest = os.path.join(dest_dir, safe_filename)
+
+    # Validate resolved path stays within dest_dir
+    if not os.path.realpath(dest).startswith(os.path.realpath(dest_dir)):
+        raise HTTPException(400, "Invalid filename")
 
     content = await file.read()
     async with aiofiles.open(dest, "wb") as f:
@@ -255,9 +267,9 @@ async def upload_model(
 
     model = MLModel(
         slug=slug,
-        name=file.filename.replace(".pt", ""),
+        name=safe_filename.replace(".pt", ""),
         model_type="yolo",
-        description=f"Custom uploaded YOLO model: {file.filename}",
+        description=f"Custom uploaded YOLO model: {safe_filename}",
         file_path=dest,
         file_size_bytes=len(content),
         status=ModelStatus.custom,

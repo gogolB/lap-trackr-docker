@@ -31,7 +31,10 @@ function ProgressPoller({ modelId }: { modelId: string }) {
   const { data } = useQuery<ModelDownloadProgress>({
     queryKey: ["model-progress", modelId],
     queryFn: () => getModelProgress(modelId),
-    refetchInterval: 1000,
+    refetchInterval: (query) => {
+      const progress = query.state.data;
+      return progress?.status === "downloading" ? 1000 : false;
+    },
   });
 
   if (!data || data.status === "unknown") return null;
@@ -183,7 +186,10 @@ export default function ModelsPage() {
   } = useQuery<MLModel[]>({
     queryKey: ["models"],
     queryFn: getModels,
-    refetchInterval: 5000,
+    refetchInterval: (query) => {
+      const data = query.state.data;
+      return data?.some((m) => m.status === "downloading") ? 5000 : false;
+    },
   });
 
   const uploadMut = useMutation({

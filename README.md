@@ -52,6 +52,92 @@ CORS_ORIGINS=http://localhost,https://your-domain.com
 
 All API endpoints (sessions, models, calibration, results) require a valid JWT Bearer token. The `/models/` endpoints are now authenticated — unauthenticated requests return 401.
 
+### Enabling HTTPS (TLS)
+
+The built-in nginx config serves HTTP only. TLS is intentionally left as a deployment-time concern — set it up using one of the approaches below.
+
+#### Option A: Let's Encrypt with Certbot (recommended for internet-facing)
+
+1. Install certbot on the host:
+
+```bash
+sudo apt install certbot
+sudo certbot certonly --standalone -d your-domain.com
+```
+
+2. Create `services/nginx/nginx-ssl.conf` (do not commit — add to `.gitignore`):
+
+```nginx
+server {
+    listen 80;
+    server_name your-domain.com;
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl;
+    server_name your-domain.com;
+
+    ssl_certificate     /etc/letsencrypt/live/your-domain.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/your-domain.com/privkey.pem;
+    ssl_protocols       TLSv1.2 TLSv1.3;
+    ssl_ciphers         HIGH:!aNULL:!MD5;
+
+    # Include your existing location blocks from nginx.conf here
+    include /etc/nginx/conf.d/locations.conf;
+}
+```
+
+3. Mount the certs and config in `docker-compose.override.yml`:
+
+```yaml
+services:
+  nginx:
+    ports:
+      - "443:443"
+    volumes:
+      - ./services/nginx/nginx-ssl.conf:/etc/nginx/conf.d/default.conf:ro
+      - /etc/letsencrypt:/etc/letsencrypt:ro
+```
+
+4. Set up auto-renewal:
+
+```bash
+sudo certbot renew --deploy-hook "docker compose restart nginx"
+```
+
+#### Option B: Self-signed certificate (LAN / development)
+
+```bash
+mkdir -p services/nginx/certs
+openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+  -keyout services/nginx/certs/selfsigned.key \
+  -out services/nginx/certs/selfsigned.crt \
+  -subj "/CN=lap-trackr"
+```
+
+Then add to `docker-compose.override.yml`:
+
+```yaml
+services:
+  nginx:
+    ports:
+      - "443:443"
+    volumes:
+      - ./services/nginx/certs:/etc/nginx/certs:ro
+```
+
+And update your nginx config to use:
+
+```nginx
+ssl_certificate     /etc/nginx/certs/selfsigned.crt;
+ssl_certificate_key /etc/nginx/certs/selfsigned.key;
+```
+
+#### Option C: External reverse proxy
+
+If you already run a reverse proxy (Traefik, Caddy, HAProxy) on the host, point it at `http://localhost:80` and handle TLS termination there. No changes to Lap-Trackr needed.
+
 ## Running on the Jetson (production)
 
 Requires Jetson AGX Orin with JetPack 5.1.2+ and two ZED X cameras (GMSL2).

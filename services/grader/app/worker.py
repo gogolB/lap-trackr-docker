@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import signal
 import sys
 import traceback
 
@@ -22,24 +23,44 @@ logger = logging.getLogger("grader.worker")
 
 QUEUE_KEY = "grading_jobs"
 
+_shutdown = False
+
+
+def _handle_signal(signum, frame):
+    global _shutdown
+    _shutdown = True
+    logger.info("Received signal %s, will exit after current job", signum)
+
 
 def main() -> None:
     """Block on the Redis queue and process grading jobs forever."""
+    global _shutdown
+
+    signal.signal(signal.SIGTERM, _handle_signal)
+    signal.signal(signal.SIGINT, _handle_signal)
 
     logger.info("Connecting to Redis at %s", REDIS_URL)
     redis_client = redis.Redis.from_url(REDIS_URL, decode_responses=True)
     redis_client.ping()
     logger.info("Redis connection OK -- waiting for jobs on '%s'", QUEUE_KEY)
 
-    while True:
-        # BRPOP blocks until a job is available (timeout=0 means wait forever)
-        _, raw = redis_client.brpop(QUEUE_KEY, timeout=0)
+    while not _shutdown:
+        # BRPOP with timeout allows checking shutdown flag between polls
+        result = redis_client.brpop(QUEUE_KEY, timeout=5)
+        if result is None:
+            continue
+        _, raw = result
         try:
             job: dict = json.loads(raw)
             session_id: str = job["session_id"]
         except (json.JSONDecodeError, KeyError, TypeError) as exc:
             logger.error("Malformed job message, skipping: %s (raw=%r)", exc, raw[:200] if raw else raw)
             continue
+
+        if not job.get("on_axis_path") and not job.get("off_axis_path"):
+            logger.error("Job for session %s missing both on_axis_path and off_axis_path, skipping", session_id)
+            continue
+
         logger.info("Received job for session %s", session_id)
 
         try:
