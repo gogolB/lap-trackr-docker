@@ -1,0 +1,18 @@
+FROM python:3.10-slim-bookworm
+
+WORKDIR /opt/grader
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends gcc libpq-dev && \
+    rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt .
+# Install deps, skipping ultralytics on dev (needs torch)
+RUN pip install --no-cache-dir \
+    redis sqlalchemy psycopg2-binary scipy numpy
+
+COPY app/ app/
+
+ENV PYTHONUNBUFFERED=1
+
+CMD ["python3", "-m", "app.worker"]

@@ -12,15 +12,14 @@ COPY . .
 RUN npm run build
 
 # Stage 2: Output
-# Lightweight image that just copies the built assets and exits
+# Lightweight image that copies the built assets into the shared volume at runtime.
 FROM alpine:3.19
 
 WORKDIR /app
 
-# Copy built assets from builder
-COPY --from=builder /app/dist /app/dist
+# Store built assets in a staging directory (not the volume mount point)
+COPY --from=builder /app/dist /app/_build
 
-# This container's only purpose is to provide the built assets.
-# In docker-compose, the dist directory is shared via a volume,
-# and the container exits immediately after starting.
-CMD ["echo", "Frontend build complete - assets available at /app/dist"]
+# At runtime, clear the volume and copy fresh assets into it.
+# The volume is mounted at /app/dist by docker-compose.
+CMD ["sh", "-c", "rm -rf /app/dist/* 2>/dev/null; cp -r /app/_build/* /app/dist/ && echo 'Frontend build deployed to /app/dist'"]

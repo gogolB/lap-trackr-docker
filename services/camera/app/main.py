@@ -10,15 +10,17 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from app.calibrator import ChArUcoCalibrator
-from app.camera_manager import CameraManager
 from app.config import config
 
-
-# ---------------------------------------------------------------------------
-# Application lifespan -- open cameras on startup, close on shutdown
-# ---------------------------------------------------------------------------
-
-manager = CameraManager()
+# Auto-detect whether ZED SDK is available; fall back to mock if not.
+try:
+    import pyzed.sl  # noqa: F401
+    from app.camera_manager import CameraManager
+    manager = CameraManager()
+except ImportError:
+    from app.camera_manager_mock import MockCameraManager  # type: ignore[assignment]
+    manager = MockCameraManager()
+    print("[camera] ZED SDK not available -- running in MOCK mode")
 
 # Per-camera calibrators, created on first use
 _calibrators: dict[str, ChArUcoCalibrator] = {}

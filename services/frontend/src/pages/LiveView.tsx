@@ -17,12 +17,9 @@ import {
 } from "../api/client";
 
 type CameraName = "on_axis" | "off_axis";
-type Eye = "left" | "right";
 type ViewStatus = "idle" | "recording" | "stopping";
 
 export default function LiveView() {
-  const [camera, setCamera] = useState<CameraName>("on_axis");
-  const [eye, setEye] = useState<Eye>("left");
   const [status, setStatus] = useState<ViewStatus>("idle");
   const [activeSession, setActiveSession] = useState<Session | null>(null);
   const [elapsed, setElapsed] = useState(0);
@@ -188,8 +185,6 @@ export default function LiveView() {
     }
   };
 
-  const streamUrl = `/ws/camera/stream/${camera}?eye=${eye}`;
-
   const hasDefault = (cam: string) =>
     defaults.some((d) => d.camera_name === cam);
 
@@ -239,146 +234,110 @@ export default function LiveView() {
         </div>
       )}
 
-      {/* Main content grid */}
-      <div className="grid grid-cols-1 gap-6 lg:grid-cols-4">
-        {/* Video stream */}
-        <div className="lg:col-span-3">
-          <div className="card overflow-hidden p-0">
-            <div className="relative aspect-video w-full bg-black">
-              <img
-                src={streamUrl}
-                alt={`${camera} camera stream`}
-                className="h-full w-full object-contain"
-              />
-              {/* Recording overlay */}
-              {status === "recording" && (
-                <div className="absolute left-4 top-4 flex items-center gap-2 rounded-lg bg-black/60 px-3 py-1.5 backdrop-blur-sm">
-                  <span className="h-2 w-2 animate-pulse rounded-full bg-red-500" />
-                  <span className="font-mono text-sm font-bold text-white">
-                    REC {formatElapsed(elapsed)}
-                  </span>
+      {/* 2x2 camera grid */}
+      <div className="grid grid-cols-2 gap-3">
+        {(["on_axis", "off_axis"] as const).map((cam) =>
+          (["left", "right"] as const).map((e) => (
+            <div key={`${cam}-${e}`} className="card overflow-hidden p-0">
+              <div className="relative aspect-video w-full bg-black">
+                <img
+                  src={`/ws/camera/stream/${cam}?eye=${e}`}
+                  alt={`${cam} ${e}`}
+                  className="h-full w-full object-contain"
+                />
+                {/* Label overlay */}
+                <div className="absolute left-2 top-2 rounded bg-black/60 px-2 py-1 text-xs font-medium text-white backdrop-blur-sm">
+                  {cam.replace("_", " ")} / {e}
                 </div>
-              )}
+                {/* Recording indicator */}
+                {status === "recording" && cam === "on_axis" && e === "left" && (
+                  <div className="absolute right-2 top-2 flex items-center gap-1.5 rounded bg-black/60 px-2 py-1 backdrop-blur-sm">
+                    <span className="h-2 w-2 animate-pulse rounded-full bg-red-500" />
+                    <span className="font-mono text-xs font-bold text-white">
+                      REC {formatElapsed(elapsed)}
+                    </span>
+                  </div>
+                )}
+              </div>
             </div>
-          </div>
-        </div>
+          ))
+        )}
+      </div>
 
-        {/* Controls panel */}
-        <div className="space-y-4">
-          {/* Camera selector */}
-          <div className="card">
-            <h3 className="mb-3 text-sm font-semibold text-slate-300">
-              Camera
-            </h3>
-            <select
-              value={camera}
-              onChange={(e) => setCamera(e.target.value as CameraName)}
-              className="input-field"
+      {/* Controls row */}
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+        {/* Recording controls */}
+        <div className="card">
+          <h3 className="mb-3 text-sm font-semibold text-slate-300">
+            Recording
+          </h3>
+
+          {status === "idle" ? (
+            <button
+              onClick={handleStart}
+              className="btn-primary w-full gap-2"
             >
-              <option value="on_axis">On-Axis</option>
-              <option value="off_axis">Off-Axis</option>
-            </select>
-          </div>
-
-          {/* Eye selector */}
-          <div className="card">
-            <h3 className="mb-3 text-sm font-semibold text-slate-300">
-              Stereo Eye
-            </h3>
-            <div className="flex gap-2">
-              {(["left", "right"] as Eye[]).map((e) => (
-                <button
-                  key={e}
-                  onClick={() => setEye(e)}
-                  className={`flex-1 rounded-lg px-3 py-2 text-sm font-medium transition-colors ${
-                    eye === e
-                      ? "bg-teal-600 text-white"
-                      : "bg-slate-700/50 text-slate-300 hover:bg-slate-700"
-                  }`}
-                >
-                  {e === "left" ? "Left" : "Right"}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          {/* Recording controls */}
-          <div className="card">
-            <h3 className="mb-3 text-sm font-semibold text-slate-300">
-              Recording
-            </h3>
-
-            {status === "idle" ? (
-              <button
-                onClick={handleStart}
-                className="btn-primary w-full gap-2"
+              <svg
+                className="h-4 w-4"
+                fill="currentColor"
+                viewBox="0 0 24 24"
               >
-                <svg
-                  className="h-4 w-4"
-                  fill="currentColor"
-                  viewBox="0 0 24 24"
-                >
-                  <circle cx="12" cy="12" r="8" />
-                </svg>
-                Start Recording
-              </button>
-            ) : (
-              <button
-                onClick={handleStop}
-                disabled={status === "stopping"}
-                className="btn-danger w-full gap-2"
+                <circle cx="12" cy="12" r="8" />
+              </svg>
+              Start Recording
+            </button>
+          ) : (
+            <button
+              onClick={handleStop}
+              disabled={status === "stopping"}
+              className="btn-danger w-full gap-2"
+            >
+              <svg
+                className="h-4 w-4"
+                fill="currentColor"
+                viewBox="0 0 24 24"
               >
-                <svg
-                  className="h-4 w-4"
-                  fill="currentColor"
-                  viewBox="0 0 24 24"
-                >
-                  <rect x="6" y="6" width="12" height="12" rx="1" />
-                </svg>
-                {status === "stopping" ? "Stopping..." : "Stop Recording"}
-              </button>
-            )}
-          </div>
+                <rect x="6" y="6" width="12" height="12" rx="1" />
+              </svg>
+              {status === "stopping" ? "Stopping..." : "Stop Recording"}
+            </button>
+          )}
 
-          {/* Timer display */}
           {status === "recording" && (
-            <div className="card text-center">
-              <h3 className="mb-2 text-sm font-semibold text-slate-300">
-                Elapsed Time
-              </h3>
-              <p className="font-mono text-4xl font-bold text-white tabular-nums">
+            <div className="mt-3 text-center">
+              <p className="font-mono text-2xl font-bold text-white tabular-nums">
                 {formatElapsed(elapsed)}
               </p>
             </div>
           )}
+        </div>
 
-          {/* Calibration status badges */}
-          <div className="card">
-            <h3 className="mb-3 text-sm font-semibold text-slate-300">
-              Calibration
-            </h3>
-            <div className="mb-3 flex gap-2">
-              {(["on_axis", "off_axis"] as const).map((cam) => (
-                <span
-                  key={cam}
-                  className={`rounded-full px-2.5 py-1 text-xs font-medium ${
-                    hasDefault(cam)
-                      ? "bg-emerald-500/10 text-emerald-400"
-                      : "bg-yellow-500/10 text-yellow-400"
-                  }`}
-                >
-                  {cam.replace("_", " ")}:{" "}
-                  {hasDefault(cam) ? "Calibrated" : "Not calibrated"}
-                </span>
-              ))}
-            </div>
-            <button
-              onClick={() => setCalibOpen(!calibOpen)}
-              className="w-full rounded-lg bg-slate-700/50 px-3 py-2 text-sm font-medium text-slate-300 transition-colors hover:bg-slate-700"
-            >
-              {calibOpen ? "Hide Calibration Panel" : "Open Calibration Panel"}
-            </button>
+        {/* Calibration status */}
+        <div className="card">
+          <h3 className="mb-3 text-sm font-semibold text-slate-300">
+            Calibration
+          </h3>
+          <div className="mb-3 flex flex-wrap gap-2">
+            {(["on_axis", "off_axis"] as const).map((cam) => (
+              <span
+                key={cam}
+                className={`rounded-full px-2.5 py-1 text-xs font-medium ${
+                  hasDefault(cam)
+                    ? "bg-emerald-500/10 text-emerald-400"
+                    : "bg-yellow-500/10 text-yellow-400"
+                }`}
+              >
+                {cam.replace("_", " ")}:{" "}
+                {hasDefault(cam) ? "Calibrated" : "Not calibrated"}
+              </span>
+            ))}
           </div>
+          <button
+            onClick={() => setCalibOpen(!calibOpen)}
+            className="w-full rounded-lg bg-slate-700/50 px-3 py-2 text-sm font-medium text-slate-300 transition-colors hover:bg-slate-700"
+          >
+            {calibOpen ? "Hide Calibration Panel" : "Open Calibration Panel"}
+          </button>
         </div>
       </div>
 

@@ -1,0 +1,50 @@
+services:
+  camera:
+    build:
+      context: ./services/camera
+      dockerfile: Dockerfile.dev
+    restart: unless-stopped
+    environment:
+      ZED_SERIAL_ON_AXIS: ${ZED_SERIAL_ON_AXIS:-MOCK-00001}
+      ZED_SERIAL_OFF_AXIS: ${ZED_SERIAL_OFF_AXIS:-MOCK-00002}
+      DATA_DIR: ${DATA_DIR}
+      CAMERA_HOST: ${CAMERA_HOST}
+      CAMERA_PORT: ${CAMERA_PORT}
+      CHARUCO_ROWS: ${CHARUCO_ROWS:-14}
+      CHARUCO_COLS: ${CHARUCO_COLS:-9}
+      CHARUCO_SQUARE_SIZE_MM: ${CHARUCO_SQUARE_SIZE_MM:-20.0}
+      CHARUCO_MARKER_SIZE_MM: ${CHARUCO_MARKER_SIZE_MM:-15.0}
+      CHARUCO_DICT: ${CHARUCO_DICT:-DICT_5X5_50}
+      CALIBRATION_DIR: ${CALIBRATION_DIR:-/data/calibration}
+    volumes:
+      - /data:/data
+    ports:
+      - "8001:8001"
+    # No privileged, runtime, or device mounts needed
+
+  grader:
+    build:
+      context: ./services/grader
+      dockerfile: Dockerfile.dev
+    restart: unless-stopped
+    environment:
+      REDIS_URL: ${REDIS_URL}
+      DATABASE_URL: ${DATABASE_URL}
+      DATA_DIR: ${DATA_DIR}
+      MODELS_DIR: ${MODELS_DIR:-/data/models}
+    volumes:
+      - /data:/data
+    depends_on:
+      redis:
+        condition: service_healthy
+      db:
+        condition: service_healthy
+
+  nginx:
+    depends_on:
+      api:
+        condition: service_healthy
+      camera:
+        condition: service_started
+      frontend:
+        condition: service_completed_successfully
