@@ -28,6 +28,8 @@ class MockCameraManager:
         self._intrinsics: dict[str, dict] = {}
         self._camera_info: dict[str, dict] = {}
         self._frame_counter = 0
+        self._swap_eyes: dict[str, bool] = {"on_axis": False, "off_axis": False}
+        self._flip: dict[str, bool] = {"on_axis": False, "off_axis": False}
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -85,6 +87,33 @@ class MockCameraManager:
         self.recording = False
 
     # ------------------------------------------------------------------
+    # Configuration
+    # ------------------------------------------------------------------
+
+    def apply_config(self, config: dict) -> None:
+        """Apply camera configuration changes (mock)."""
+        self._swap_eyes = {
+            "on_axis": config.get("on_axis_swap_eyes", False),
+            "off_axis": config.get("off_axis_swap_eyes", False),
+        }
+        self._flip = {
+            "on_axis": config.get("on_axis_flip", False),
+            "off_axis": config.get("off_axis_flip", False),
+        }
+
+        new_on = config.get("on_axis_serial", "")
+        new_off = config.get("off_axis_serial", "")
+        if new_on:
+            self.serials["on_axis"] = new_on
+        if new_off:
+            self.serials["off_axis"] = new_off
+
+        print(
+            f"[mock_camera] Config applied: swap_eyes={self._swap_eyes}, "
+            f"flip={self._flip}, serials={self.serials}"
+        )
+
+    # ------------------------------------------------------------------
     # Frame retrieval (generates a test pattern)
     # ------------------------------------------------------------------
 
@@ -92,8 +121,16 @@ class MockCameraManager:
         if camera_name not in self.cameras:
             return None
 
+        actual_eye = eye
+        if self._swap_eyes.get(camera_name, False):
+            actual_eye = "right" if eye == "left" else "left"
+
         self._frame_counter += 1
-        frame = self._generate_test_frame(camera_name, eye)
+        frame = self._generate_test_frame(camera_name, actual_eye)
+
+        if self._flip.get(camera_name, False):
+            frame = cv2.rotate(frame, cv2.ROTATE_180)
+
         ok, jpeg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
         if not ok:
             return None

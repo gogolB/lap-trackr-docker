@@ -46,8 +46,17 @@ def load_svo2(
     try:
         import pyzed.sl as sl
     except ImportError:
+        sl = None
+        logger.info("ZED SDK (pyzed) not available, trying exported files")
+
+    if sl is None:
+        # Try loading from exported MP4 + NPZ
+        export_result = _try_load_from_exports(svo_path, sample_interval)
+        if export_result is not None:
+            return export_result
+
         logger.warning(
-            "ZED SDK (pyzed) not available -- returning synthetic data "
+            "No ZED SDK and no exported files -- returning synthetic data "
             "for development/testing."
         )
         return _generate_synthetic_data(sample_interval)
@@ -99,6 +108,80 @@ def load_svo2(
         len(frames),
         frame_idx,
         svo_path,
+        sample_interval,
+    )
+    return frames, depth_maps, fps
+
+
+# ---------------------------------------------------------------------------
+# Fallback: load from exported MP4 + NPZ files
+# ---------------------------------------------------------------------------
+
+def _try_load_from_exports(
+    svo_path: str,
+    sample_interval: int,
+) -> Tuple[List[np.ndarray], List[np.ndarray], float] | None:
+    """Try to load frames and depth from exported MP4 + NPZ files.
+
+    Returns None if the export files don't exist.
+    """
+    from pathlib import Path
+    import cv2
+
+    session_dir = Path(svo_path).parent
+    cam_name = Path(svo_path).stem  # "on_axis" or "off_axis"
+    mp4_path = session_dir / f"{cam_name}_left.mp4"
+    npz_path = session_dir / f"{cam_name}_depth.npz"
+
+    if not mp4_path.exists() or not npz_path.exists():
+        return None
+
+    logger.info("Loading from exports: %s + %s", mp4_path, npz_path)
+
+    # Load video frames
+    cap = cv2.VideoCapture(str(mp4_path))
+    if not cap.isOpened():
+        logger.warning("Failed to open MP4 %s", mp4_path)
+        return None
+
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    if fps <= 0:
+        fps = 30.0
+
+    # Load depth arrays
+    depth_data = np.load(str(npz_path))
+    depth_keys = sorted(depth_data.files)
+
+    frames: list[np.ndarray] = []
+    depth_maps: list[np.ndarray] = []
+    frame_idx = 0
+
+    while True:
+        ret, bgr = cap.read()
+        if not ret:
+            break
+
+        if frame_idx % sample_interval == 0:
+            frames.append(bgr.copy())
+            key = f"frame_{frame_idx:06d}"
+            if key in depth_data:
+                depth_maps.append(depth_data[key].astype(np.float32))
+            elif frame_idx < len(depth_keys):
+                depth_maps.append(depth_data[depth_keys[frame_idx]].astype(np.float32))
+            else:
+                # No depth for this frame, use zeros
+                h, w = bgr.shape[:2]
+                depth_maps.append(np.zeros((h, w), dtype=np.float32))
+
+        frame_idx += 1
+
+    cap.release()
+    depth_data.close()
+
+    logger.info(
+        "Loaded %d / %d frames from exports (sample_interval=%d)",
+        len(frames),
+        frame_idx,
         sample_interval,
     )
     return frames, depth_maps, fps

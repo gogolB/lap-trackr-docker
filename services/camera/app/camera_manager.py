@@ -40,6 +40,10 @@ class CameraManager:
         # Camera info (resolution, fps) extracted at open time
         self._camera_info: dict[str, dict] = {}
 
+        # Camera config flags
+        self._swap_eyes: dict[str, bool] = {"on_axis": False, "off_axis": False}
+        self._flip: dict[str, bool] = {"on_axis": False, "off_axis": False}
+
         # Grab-thread control
         self._grab_thread: threading.Thread | None = None
         self._grab_stop_event = threading.Event()
@@ -112,6 +116,45 @@ class CameraManager:
         self.cameras.clear()
         self._locks.clear()
         self._latest_images.clear()
+
+    # ------------------------------------------------------------------
+    # Configuration
+    # ------------------------------------------------------------------
+
+    def apply_config(self, config: dict) -> None:
+        """Apply camera configuration changes.
+
+        Updates eye-swap and flip flags immediately. Serial changes
+        require camera re-open (only done if serials actually changed).
+        """
+        self._swap_eyes = {
+            "on_axis": config.get("on_axis_swap_eyes", False),
+            "off_axis": config.get("off_axis_swap_eyes", False),
+        }
+        self._flip = {
+            "on_axis": config.get("on_axis_flip", False),
+            "off_axis": config.get("off_axis_flip", False),
+        }
+
+        new_on = config.get("on_axis_serial", "")
+        new_off = config.get("off_axis_serial", "")
+
+        serials_changed = (
+            new_on and new_off
+            and (new_on != self.serials.get("on_axis") or new_off != self.serials.get("off_axis"))
+        )
+
+        if serials_changed and not self.recording:
+            print(f"[camera_manager] Serial change detected, re-opening cameras")
+            self.close()
+            self.serials["on_axis"] = new_on
+            self.serials["off_axis"] = new_off
+            self.open_cameras()
+
+        print(
+            f"[camera_manager] Config applied: swap_eyes={self._swap_eyes}, "
+            f"flip={self._flip}"
+        )
 
     # ------------------------------------------------------------------
     # Recording
@@ -226,7 +269,12 @@ class CameraManager:
         if lock is None:
             return None
 
-        view = sl.VIEW.RIGHT if eye == "right" else sl.VIEW.LEFT
+        # Apply eye swap: if swap_eyes is set, flip the requested eye
+        actual_eye = eye
+        if self._swap_eyes.get(camera_name, False):
+            actual_eye = "right" if eye == "left" else "left"
+
+        view = sl.VIEW.RIGHT if actual_eye == "right" else sl.VIEW.LEFT
         image = sl.Mat()
 
         if self.recording:
@@ -243,6 +291,10 @@ class CameraManager:
 
         if data is None:
             return None
+
+        # Apply 180° flip if configured
+        if self._flip.get(camera_name, False):
+            data = cv2.rotate(data, cv2.ROTATE_180)
 
         ok, jpeg = cv2.imencode(
             ".jpg", data, [cv2.IMWRITE_JPEG_QUALITY, 70]

@@ -11,6 +11,7 @@ import SessionList from "./pages/SessionList";
 import SessionDetail from "./pages/SessionDetail";
 import ModelsPage from "./pages/ModelsPage";
 import HealthPage from "./pages/HealthPage";
+import ConfigPage from "./pages/ConfigPage";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -44,6 +45,7 @@ export default function App() {
               <Route path="/sessions" element={<SessionList />} />
               <Route path="/sessions/:id" element={<SessionDetail />} />
               <Route path="/models" element={<ModelsPage />} />
+              <Route path="/config" element={<ConfigPage />} />
               <Route path="/health" element={<HealthPage />} />
             </Route>
 

@@ -9,7 +9,7 @@ RUN apt-get update && \
 COPY requirements.txt .
 # Install deps, skipping ultralytics on dev (needs torch)
 RUN pip install --no-cache-dir \
-    redis sqlalchemy psycopg2-binary scipy numpy
+    redis sqlalchemy psycopg2-binary scipy numpy opencv-python-headless
 
 COPY app/ app/
 

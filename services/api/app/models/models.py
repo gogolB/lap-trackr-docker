@@ -2,7 +2,7 @@ import enum
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import BigInteger, Boolean, DateTime, Enum, Float, ForeignKey, Index, Integer, String, Text, text
+from sqlalchemy import BigInteger, Boolean, CheckConstraint, DateTime, Enum, Float, ForeignKey, Index, Integer, String, Text, text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -23,6 +23,8 @@ class ModelStatus(str, enum.Enum):
 class SessionStatus(str, enum.Enum):
     recording = "recording"
     completed = "completed"
+    exporting = "exporting"
+    export_failed = "export_failed"
     grading = "grading"
     graded = "graded"
     failed = "failed"
@@ -175,4 +177,25 @@ class MLModel(Base):
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),
         onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+
+class CameraConfig(Base):
+    __tablename__ = "camera_config"
+    __table_args__ = (
+        CheckConstraint("id = 1", name="single_row_camera_config"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    on_axis_serial: Mapped[str] = mapped_column(String(32), nullable=False)
+    off_axis_serial: Mapped[str] = mapped_column(String(32), nullable=False)
+    on_axis_swap_eyes: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    off_axis_swap_eyes: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    on_axis_flip: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    off_axis_flip: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+        nullable=True,
     )

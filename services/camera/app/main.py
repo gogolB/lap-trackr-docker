@@ -57,6 +57,15 @@ app = FastAPI(
 # Request / response models
 # ---------------------------------------------------------------------------
 
+class CameraConfigApply(BaseModel):
+    on_axis_serial: str = ""
+    off_axis_serial: str = ""
+    on_axis_swap_eyes: bool = False
+    off_axis_swap_eyes: bool = False
+    on_axis_flip: bool = False
+    off_axis_flip: bool = False
+
+
 class RecordStartRequest(BaseModel):
     session_dir: str
 
@@ -159,6 +168,18 @@ def get_intrinsics(camera_name: str):
 def get_camera_info():
     """Return per-camera info (serial, resolution, fps) and SDK version."""
     return manager.get_camera_info()
+
+
+# ---------------------------------------------------------------------------
+# Camera configuration
+# ---------------------------------------------------------------------------
+
+@app.post("/config/apply")
+def apply_config(body: CameraConfigApply):
+    """Apply camera configuration (eye swap, flip, serial assignment)."""
+    config_dict = body.model_dump()
+    manager.apply_config(config_dict)
+    return {"status": "applied", "config": config_dict}
 
 
 # ---------------------------------------------------------------------------

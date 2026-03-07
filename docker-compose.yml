@@ -116,6 +116,26 @@ services:
       db:
         condition: service_healthy
 
+  exporter:
+    build:
+      context: ./services/grader
+      dockerfile: Dockerfile
+    command: ["python3", "-m", "app.export_worker"]
+    restart: unless-stopped
+    runtime: nvidia
+    environment:
+      REDIS_URL: ${REDIS_URL}
+      DATABASE_URL: ${DATABASE_URL}
+      DATA_DIR: ${DATA_DIR}
+    volumes:
+      - /data:/data
+      - /usr/local/zed:/usr/local/zed
+    depends_on:
+      redis:
+        condition: service_healthy
+      db:
+        condition: service_healthy
+
   frontend:
     build:
       context: ./services/frontend

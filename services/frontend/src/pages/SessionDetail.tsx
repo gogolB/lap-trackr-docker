@@ -16,6 +16,7 @@ import {
   getMetrics,
   gradeSession,
   deleteSession,
+  downloadSession,
   getSessionDuration,
   type MetricsData,
   type SessionDetail as SessionDetailType,
@@ -65,6 +66,7 @@ export default function SessionDetail() {
 
   const [isGrading, setIsGrading] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
+  const [isDownloading, setIsDownloading] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [actionError, setActionError] = useState("");
 
@@ -79,7 +81,9 @@ export default function SessionDetail() {
     enabled: !!id,
     refetchInterval: (query) => {
       const data = query.state.data;
-      return data?.status === "grading" ? 3000 : false;
+      return data?.status === "grading" || data?.status === "exporting"
+        ? 3000
+        : false;
     },
   });
 
@@ -103,6 +107,21 @@ export default function SessionDetail() {
       );
     } finally {
       setIsGrading(false);
+    }
+  };
+
+  const handleDownload = async () => {
+    if (!id) return;
+    setActionError("");
+    setIsDownloading(true);
+    try {
+      await downloadSession(id);
+    } catch (err) {
+      setActionError(
+        err instanceof Error ? err.message : "Failed to download session."
+      );
+    } finally {
+      setIsDownloading(false);
     }
   };
 
@@ -188,6 +207,39 @@ export default function SessionDetail() {
           </div>
 
           <div className="flex items-center gap-3">
+            {/* Download */}
+            {(session.status === "completed" || session.status === "graded") && (
+              <button
+                onClick={handleDownload}
+                disabled={isDownloading}
+                className="btn-secondary gap-2"
+              >
+                {isDownloading ? (
+                  <>
+                    <span className="h-4 w-4 animate-spin rounded-full border-2 border-slate-400/30 border-t-slate-400" />
+                    Downloading...
+                  </>
+                ) : (
+                  <>
+                    <svg
+                      className="h-4 w-4"
+                      fill="none"
+                      viewBox="0 0 24 24"
+                      strokeWidth={2}
+                      stroke="currentColor"
+                    >
+                      <path
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12m4.5 4.5V3"
+                      />
+                    </svg>
+                    Download
+                  </>
+                )}
+              </button>
+            )}
+
             {/* Submit for grading */}
             {session.status === "completed" && (
               <button
@@ -267,6 +319,52 @@ export default function SessionDetail() {
       {actionError && (
         <div className="rounded-lg bg-red-400/10 px-4 py-3 text-sm text-red-400">
           {actionError}
+        </div>
+      )}
+
+      {/* Exporting in progress */}
+      {session.status === "exporting" && (
+        <div className="card">
+          <div className="flex flex-col items-center gap-4 py-8">
+            <div className="h-10 w-10 animate-spin rounded-full border-3 border-orange-400/30 border-t-orange-400" />
+            <div className="text-center">
+              <p className="text-lg font-semibold text-white">
+                Exporting session files...
+              </p>
+              <p className="mt-1 text-sm text-slate-400">
+                Converting SVO2 recordings to MP4 + depth data. This page will
+                update automatically.
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Export failed */}
+      {session.status === "export_failed" && (
+        <div className="card border-red-500/30">
+          <div className="flex items-start gap-3">
+            <svg
+              className="mt-0.5 h-5 w-5 flex-shrink-0 text-red-400"
+              fill="none"
+              viewBox="0 0 24 24"
+              strokeWidth={2}
+              stroke="currentColor"
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z"
+              />
+            </svg>
+            <div>
+              <p className="font-semibold text-red-400">Export Failed</p>
+              <p className="mt-1 text-sm text-slate-400">
+                Failed to export SVO2 files. The original recordings are still
+                available on the device.
+              </p>
+            </div>
+          </div>
         </div>
       )}
 

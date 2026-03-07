@@ -1,6 +1,5 @@
 import React from "react";
-
-type SessionStatus = "recording" | "completed" | "grading" | "graded" | "failed";
+import type { SessionStatus } from "../api/client";
 
 interface StatusBadgeProps {
   status: SessionStatus;
@@ -23,6 +22,18 @@ const statusConfig: Record<
     textClass: "text-blue-400",
     dotClass: "bg-blue-400",
   },
+  exporting: {
+    label: "Exporting",
+    bgClass: "bg-orange-400/10",
+    textClass: "text-orange-400",
+    dotClass: "bg-orange-400",
+  },
+  export_failed: {
+    label: "Export Failed",
+    bgClass: "bg-red-400/10",
+    textClass: "text-red-400",
+    dotClass: "bg-red-400",
+  },
   grading: {
     label: "Grading",
     bgClass: "bg-purple-400/10",
@@ -43,6 +54,8 @@ const statusConfig: Record<
   },
 };
 
+const animatedStatuses: SessionStatus[] = ["recording", "grading", "exporting"];
+
 export default function StatusBadge({ status, className = "" }: StatusBadgeProps) {
   const config = statusConfig[status] ?? statusConfig.completed;
 
@@ -52,7 +65,7 @@ export default function StatusBadge({ status, className = "" }: StatusBadgeProps
     >
       <span
         className={`inline-block h-1.5 w-1.5 rounded-full ${config.dotClass} ${
-          status === "recording" || status === "grading" ? "animate-pulse" : ""
+          animatedStatuses.includes(status) ? "animate-pulse" : ""
         }`}
       />
       {config.label}

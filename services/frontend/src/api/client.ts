@@ -92,10 +92,19 @@ export async function getMe(): Promise<User> {
 
 // ---- Sessions ----
 
+export type SessionStatus =
+  | "recording"
+  | "completed"
+  | "exporting"
+  | "export_failed"
+  | "grading"
+  | "graded"
+  | "failed";
+
 export interface Session {
   id: string;
   user_id: string;
-  status: "recording" | "completed" | "grading" | "graded" | "failed";
+  status: SessionStatus;
   started_at: string;
   stopped_at: string | null;
   on_axis_path: string | null;
@@ -141,6 +150,34 @@ export async function deleteSession(id: string): Promise<void> {
   return request<void>(`/api/sessions/${id}`, {
     method: "DELETE",
   });
+}
+
+export async function downloadSession(id: string): Promise<void> {
+  const token = getToken();
+  const headers: Record<string, string> = {};
+  if (token) {
+    headers["Authorization"] = `Bearer ${token}`;
+  }
+
+  const response = await fetch(`${BASE_URL}/api/sessions/${id}/download`, {
+    headers,
+  });
+
+  if (!response.ok) {
+    throw new Error(`Download failed: ${response.statusText}`);
+  }
+
+  const blob = await response.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  const disposition = response.headers.get("Content-Disposition");
+  const match = disposition?.match(/filename="?([^"]+)"?/);
+  a.download = match?.[1] ?? `session_${id}.zip`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
 }
 
 // ---- Grading ----
@@ -405,6 +442,46 @@ export interface SystemHealth {
 
 export async function getSystemHealth(): Promise<SystemHealth> {
   return request<SystemHealth>("/api/health/system");
+}
+
+// ---- Camera Config ----
+
+export interface CameraConfig {
+  on_axis_serial: string;
+  off_axis_serial: string;
+  on_axis_swap_eyes: boolean;
+  off_axis_swap_eyes: boolean;
+  on_axis_flip: boolean;
+  off_axis_flip: boolean;
+  updated_at: string | null;
+}
+
+export interface CameraConfigUpdate {
+  on_axis_serial?: string;
+  off_axis_serial?: string;
+  on_axis_swap_eyes?: boolean;
+  off_axis_swap_eyes?: boolean;
+  on_axis_flip?: boolean;
+  off_axis_flip?: boolean;
+}
+
+export async function getCameraConfig(): Promise<CameraConfig> {
+  return request<CameraConfig>("/api/camera-config/");
+}
+
+export async function updateCameraConfig(
+  data: CameraConfigUpdate
+): Promise<CameraConfig> {
+  return request<CameraConfig>("/api/camera-config/", {
+    method: "PUT",
+    body: JSON.stringify(data),
+  });
+}
+
+export async function applyCameraConfig(): Promise<{ status: string }> {
+  return request<{ status: string }>("/api/camera-config/apply", {
+    method: "POST",
+  });
 }
 
 // ---- Token utilities exposed for auth hook ----

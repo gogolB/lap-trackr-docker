@@ -1,6 +1,8 @@
+import io
 import json
 import logging
 import shutil
+import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import UUID
@@ -8,6 +10,7 @@ from uuid import UUID
 import httpx
 import redis.asyncio as redis
 from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -163,8 +166,25 @@ async def stop_session(
             detail="Failed to contact camera service to stop recording",
         )
 
-    session.status = SessionStatus.completed
     session.stopped_at = datetime.now(timezone.utc)
+
+    # Queue export job (SVO2 → MP4 + NPZ)
+    export_job = json.dumps(
+        {
+            "session_id": str(session.id),
+            "on_axis_path": session.on_axis_path,
+            "off_axis_path": session.off_axis_path,
+        }
+    )
+    try:
+        r = redis.from_url(settings.REDIS_URL)
+        await r.lpush("export_jobs", export_job)
+        await r.aclose()
+        session.status = SessionStatus.exporting
+    except Exception:
+        logger.warning("Failed to enqueue export job, setting status to completed")
+        session.status = SessionStatus.completed
+
     await db.commit()
     await db.refresh(session)
     return session
@@ -250,3 +270,52 @@ async def grade_session(
     await db.commit()
     await db.refresh(session)
     return session
+
+
+@router.get("/{session_id}/download")
+async def download_session(
+    session_id: UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Stream a ZIP of the session directory (MP4, NPZ, calibration, metadata, results)."""
+    result = await db.execute(
+        select(Session).where(
+            Session.id == session_id, Session.user_id == current_user.id
+        )
+    )
+    session = result.scalar_one_or_none()
+    if session is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Session not found"
+        )
+
+    if not session.on_axis_path:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="No session files found"
+        )
+
+    session_dir = Path(session.on_axis_path).parent
+    if not session_dir.exists():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Session directory not found on disk",
+        )
+
+    # Build ZIP in memory
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for file_path in sorted(session_dir.rglob("*")):
+            if file_path.is_file():
+                arcname = file_path.relative_to(session_dir)
+                zf.write(file_path, arcname)
+    buf.seek(0)
+
+    timestamp = session.started_at.strftime("%Y-%m-%d_%H-%M-%S")
+    filename = f"session_{timestamp}.zip"
+
+    return StreamingResponse(
+        buf,
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )

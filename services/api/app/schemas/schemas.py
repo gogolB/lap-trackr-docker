@@ -127,6 +127,33 @@ class CalibrationOut(BaseModel):
 # ── ML Models ───────────────────────────────────────────────────────
 
 
+# ── Camera Config ──────────────────────────────────────────────────
+
+
+class CameraConfigOut(BaseModel):
+    on_axis_serial: str
+    off_axis_serial: str
+    on_axis_swap_eyes: bool = False
+    off_axis_swap_eyes: bool = False
+    on_axis_flip: bool = False
+    off_axis_flip: bool = False
+    updated_at: datetime | None = None
+
+    model_config = {"from_attributes": True}
+
+
+class CameraConfigUpdate(BaseModel):
+    on_axis_serial: str | None = None
+    off_axis_serial: str | None = None
+    on_axis_swap_eyes: bool | None = None
+    off_axis_swap_eyes: bool | None = None
+    on_axis_flip: bool | None = None
+    off_axis_flip: bool | None = None
+
+
+# ── ML Models ───────────────────────────────────────────────────────
+
+
 class MLModelOut(BaseModel):
     id: UUID
     slug: str
