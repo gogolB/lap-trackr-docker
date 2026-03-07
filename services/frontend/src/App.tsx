@@ -10,6 +10,7 @@ import LiveView from "./pages/LiveView";
 import SessionList from "./pages/SessionList";
 import SessionDetail from "./pages/SessionDetail";
 import ModelsPage from "./pages/ModelsPage";
+import HealthPage from "./pages/HealthPage";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -43,6 +44,7 @@ export default function App() {
               <Route path="/sessions" element={<SessionList />} />
               <Route path="/sessions/:id" element={<SessionDetail />} />
               <Route path="/models" element={<ModelsPage />} />
+              <Route path="/health" element={<HealthPage />} />
             </Route>
 
             {/* Fallback */}

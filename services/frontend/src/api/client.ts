@@ -277,6 +277,136 @@ export async function uploadModel(file: File): Promise<MLModel> {
   return response.json();
 }
 
+// ---- Calibration ----
+
+export interface BoardConfig {
+  rows: number;
+  cols: number;
+  square_size_mm: number;
+  marker_size_mm: number;
+  aruco_dict: string;
+}
+
+export interface CalibrationCaptureResult {
+  success: boolean;
+  markers_detected: number;
+  charuco_corners: number;
+  coverage_pct: number;
+  total_captures: number;
+  preview_jpeg_b64: string | null;
+}
+
+export interface CalibrationStatus {
+  [camera: string]: {
+    total_captures: number;
+    board_config: BoardConfig;
+  };
+}
+
+export interface CalibrationData {
+  version: number;
+  is_global: boolean;
+  camera_name: string;
+  intrinsics: {
+    fx: number;
+    fy: number;
+    cx: number;
+    cy: number;
+    distortion: number[];
+    image_width: number;
+    image_height: number;
+  };
+  extrinsic_matrix: number[][] | null;
+  board_config: BoardConfig;
+  quality: {
+    reprojection_error: number;
+    num_frames_used: number;
+  };
+}
+
+export interface CalibrationDefault {
+  id: string;
+  camera_name: string;
+  is_default: boolean;
+  fx: number;
+  fy: number;
+  cx: number;
+  cy: number;
+  image_width: number;
+  image_height: number;
+  reprojection_error: number | null;
+  num_frames_used: number | null;
+  created_at: string;
+}
+
+export async function captureCalibrationFrame(
+  camera: string
+): Promise<CalibrationCaptureResult> {
+  return request<CalibrationCaptureResult>(
+    `/api/calibration/capture/${camera}`,
+    { method: "POST" }
+  );
+}
+
+export async function computeCalibration(
+  camera: string,
+  saveAsDefault: boolean = true
+): Promise<CalibrationData> {
+  return request<CalibrationData>(
+    `/api/calibration/compute/${camera}?save_as_default=${saveAsDefault}`,
+    { method: "POST" }
+  );
+}
+
+export async function resetCalibration(
+  camera: string
+): Promise<{ status: string }> {
+  return request<{ status: string }>(
+    `/api/calibration/reset/${camera}`,
+    { method: "POST" }
+  );
+}
+
+export async function getCalibrationStatus(): Promise<CalibrationStatus> {
+  return request<CalibrationStatus>("/api/calibration/status");
+}
+
+export async function getDefaultCalibrations(): Promise<CalibrationDefault[]> {
+  return request<CalibrationDefault[]>("/api/calibration/defaults");
+}
+
+export async function deleteDefaultCalibration(
+  camera: string
+): Promise<void> {
+  return request<void>(`/api/calibration/defaults/${camera}`, {
+    method: "DELETE",
+  });
+}
+
+// ---- System Health ----
+
+export interface ServiceHealth {
+  status: "ok" | "error";
+  latency_ms?: number;
+  error?: string;
+  [key: string]: unknown;
+}
+
+export interface SystemHealth {
+  overall: "healthy" | "degraded";
+  services: {
+    api: ServiceHealth;
+    database: ServiceHealth;
+    redis: ServiceHealth;
+    camera: ServiceHealth;
+    grader: ServiceHealth;
+  };
+}
+
+export async function getSystemHealth(): Promise<SystemHealth> {
+  return request<SystemHealth>("/api/health/system");
+}
+
 // ---- Token utilities exposed for auth hook ----
 
 export { getToken, setToken, clearToken };

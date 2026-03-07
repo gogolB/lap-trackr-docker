@@ -42,6 +42,7 @@ services:
       REDIS_URL: ${REDIS_URL}
       DATA_DIR: ${DATA_DIR}
       MODELS_DIR: ${MODELS_DIR:-/data/models}
+      CALIBRATION_DIR: ${CALIBRATION_DIR:-/data/calibration}
       CAMERA_SERVICE_URL: http://camera:8001
     volumes:
       - /data:/data
@@ -73,6 +74,12 @@ services:
       DATA_DIR: ${DATA_DIR}
       CAMERA_HOST: ${CAMERA_HOST}
       CAMERA_PORT: ${CAMERA_PORT}
+      CHARUCO_ROWS: ${CHARUCO_ROWS:-14}
+      CHARUCO_COLS: ${CHARUCO_COLS:-9}
+      CHARUCO_SQUARE_SIZE_MM: ${CHARUCO_SQUARE_SIZE_MM:-20.0}
+      CHARUCO_MARKER_SIZE_MM: ${CHARUCO_MARKER_SIZE_MM:-15.0}
+      CHARUCO_DICT: ${CHARUCO_DICT:-DICT_5X5_50}
+      CALIBRATION_DIR: ${CALIBRATION_DIR:-/data/calibration}
     volumes:
       - /data:/data
       - /tmp:/tmp

@@ -1,4 +1,5 @@
 import json
+import logging
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
@@ -18,6 +19,7 @@ from app.models.models import Session, SessionStatus, User
 from app.schemas.schemas import SessionDetailOut, SessionOut
 
 router = APIRouter(prefix="/sessions", tags=["sessions"])
+logger = logging.getLogger("api.sessions")
 
 
 @router.get("/", response_model=list[SessionOut])
@@ -74,6 +76,37 @@ async def start_session(
 
     # Create the session directory on disk
     Path(session_dir).mkdir(parents=True, exist_ok=True)
+
+    # Copy global default calibrations into session dir
+    for cam in ("on_axis", "off_axis"):
+        default_path = Path(settings.CALIBRATION_DIR) / "default" / f"{cam}.json"
+        if default_path.exists():
+            dest = Path(session_dir) / f"calibration_{cam}.json"
+            shutil.copy2(str(default_path), str(dest))
+            logger.info("Copied default calibration for %s into session dir", cam)
+
+    # Write session_metadata.json
+    metadata = {
+        "session_id": str(session.id),
+        "user_id": str(current_user.id),
+        "started_at": now.isoformat(),
+        "cameras": {},
+        "zed_sdk_version": "unknown",
+        "software_version": "1.0.0",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            info_resp = await client.get(f"{settings.CAMERA_SERVICE_URL}/camera-info")
+            if info_resp.status_code == 200:
+                cam_info = info_resp.json()
+                metadata["cameras"] = cam_info.get("cameras", {})
+                metadata["zed_sdk_version"] = cam_info.get("zed_sdk_version", "unknown")
+    except Exception as exc:
+        logger.warning("Could not fetch camera info for metadata: %s", exc)
+
+    (Path(session_dir) / "session_metadata.json").write_text(
+        json.dumps(metadata, indent=2)
+    )
 
     # Call the camera service to start recording
     try:
@@ -186,11 +219,20 @@ async def grade_session(
             detail=f"Session must be completed before grading (current status: {session.status.value})",
         )
 
+    # Resolve calibration path from session directory
+    calibration_path = None
+    if session.on_axis_path:
+        session_dir = str(Path(session.on_axis_path).parent)
+        calib_file = Path(session_dir) / "calibration_on_axis.json"
+        if calib_file.exists():
+            calibration_path = str(calib_file)
+
     job_payload = json.dumps(
         {
             "session_id": str(session.id),
             "on_axis_path": session.on_axis_path,
             "off_axis_path": session.off_axis_path,
+            "calibration_path": calibration_path,
         }
     )
 

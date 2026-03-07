@@ -1,7 +1,8 @@
 """3D pose estimation from 2D detections and depth maps.
 
 Projects 2D pixel-coordinate detections into 3D camera-frame coordinates
-using the corresponding depth value and (placeholder) camera intrinsics.
+using the corresponding depth value and camera intrinsics (from calibration
+JSON if available, otherwise config placeholders).
 """
 
 from __future__ import annotations
@@ -22,10 +23,10 @@ def _pixel_to_3d(
     x: float,
     y: float,
     depth: float,
-    fx: float = CAMERA_FX,
-    fy: float = CAMERA_FY,
-    cx: float = CAMERA_CX,
-    cy: float = CAMERA_CY,
+    fx: float,
+    fy: float,
+    cx: float,
+    cy: float,
 ) -> list[float]:
     """Back-project a 2D pixel + depth into a 3D point [X, Y, Z] in metres."""
 
@@ -33,6 +34,14 @@ def _pixel_to_3d(
     x3d = (x - cx) * z / fx
     y3d = (y - cy) * z / fy
     return [float(x3d), float(y3d), z]
+
+
+def _transform_point(p: list[float], T: list[list[float]]) -> list[float]:
+    """Apply a 4x4 extrinsic transform to a 3D point."""
+    T_arr = np.array(T, dtype=np.float64)
+    v = np.array([p[0], p[1], p[2], 1.0])
+    w = T_arr @ v
+    return [float(w[0]), float(w[1]), float(w[2])]
 
 
 def _lookup_depth(
@@ -75,6 +84,7 @@ def estimate_poses(
     detections: list[list[Detection]],
     depth_maps: list[np.ndarray],
     fps: float | None = None,
+    calibration: dict | None = None,
 ) -> list[dict[str, Any]]:
     """Convert per-frame 2D detections + depth into 3D pose records.
 
@@ -86,6 +96,9 @@ def estimate_poses(
         Corresponding depth maps (same length as *detections*).
     fps : float, optional
         Recording FPS used to compute timestamps.
+    calibration : dict, optional
+        Calibration JSON dict with ``intrinsics`` and optionally ``extrinsic_matrix``.
+        If None, falls back to config placeholder values.
 
     Returns
     -------
@@ -103,6 +116,32 @@ def estimate_poses(
             f"Mismatch: {len(detections)} detection frames vs "
             f"{len(depth_maps)} depth maps"
         )
+
+    # Extract intrinsics from calibration or use config defaults
+    if calibration and "intrinsics" in calibration:
+        intr = calibration["intrinsics"]
+        fx = float(intr["fx"])
+        fy = float(intr["fy"])
+        cx = float(intr["cx"])
+        cy = float(intr["cy"])
+        logger.info(
+            "Using calibration intrinsics: fx=%.1f fy=%.1f cx=%.1f cy=%.1f",
+            fx, fy, cx, cy,
+        )
+    else:
+        fx, fy, cx, cy = CAMERA_FX, CAMERA_FY, CAMERA_CX, CAMERA_CY
+        logger.warning(
+            "No calibration intrinsics, using config defaults: "
+            "fx=%.1f fy=%.1f cx=%.1f cy=%.1f",
+            fx, fy, cx, cy,
+        )
+
+    # Extrinsic transform (camera-to-board frame)
+    extrinsic = calibration.get("extrinsic_matrix") if calibration else None
+    if extrinsic:
+        logger.info("Extrinsic transform available, will convert to board frame")
+    else:
+        logger.info("No extrinsic transform, poses will be in camera frame")
 
     poses: list[dict[str, Any]] = []
 
@@ -126,7 +165,11 @@ def estimate_poses(
                 )
                 continue
 
-            point = _pixel_to_3d(det.x, det.y, depth)
+            point = _pixel_to_3d(det.x, det.y, depth, fx, fy, cx, cy)
+
+            # Apply extrinsic transform if available
+            if extrinsic:
+                point = _transform_point(point, extrinsic)
 
             if det.label == "left_tip":
                 left_tip = point

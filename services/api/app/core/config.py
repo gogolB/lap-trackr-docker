@@ -9,6 +9,7 @@ class Settings(BaseSettings):
     REDIS_URL: str = "redis://redis:6379/0"
     DATA_DIR: str = "/data"
     MODELS_DIR: str = "/data/models"
+    CALIBRATION_DIR: str = "/data/calibration"
     CAMERA_SERVICE_URL: str = "http://camera:8001"
 
     class Config:

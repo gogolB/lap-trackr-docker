@@ -34,6 +34,12 @@ class CameraManager:
         # and read by get_frame() during recording.
         self._latest_images: dict[str, sl.Mat] = {}
 
+        # ZED SDK intrinsics extracted at open time
+        self._intrinsics: dict[str, dict] = {}
+
+        # Camera info (resolution, fps) extracted at open time
+        self._camera_info: dict[str, dict] = {}
+
         # Grab-thread control
         self._grab_thread: threading.Thread | None = None
         self._grab_stop_event = threading.Event()
@@ -64,6 +70,36 @@ class CameraManager:
             self.cameras[name] = cam
             self._locks[name] = threading.Lock()
             self._latest_images[name] = sl.Mat()
+
+            # Extract factory-calibrated intrinsics from the ZED SDK
+            try:
+                cam_info = cam.get_camera_information()
+                calib = cam_info.camera_configuration.calibration_parameters
+                left = calib.left_cam
+                res = cam_info.camera_configuration.resolution
+                self._intrinsics[name] = {
+                    "fx": float(left.fx),
+                    "fy": float(left.fy),
+                    "cx": float(left.cx),
+                    "cy": float(left.cy),
+                    "distortion": [float(d) for d in left.disto],
+                    "image_width": int(res.width),
+                    "image_height": int(res.height),
+                }
+                self._camera_info[name] = {
+                    "serial": serial,
+                    "resolution": [int(res.width), int(res.height)],
+                    "fps": 30,
+                }
+                print(
+                    f"[camera_manager] {name} intrinsics: "
+                    f"fx={left.fx:.1f} fy={left.fy:.1f} "
+                    f"cx={left.cx:.1f} cy={left.cy:.1f} "
+                    f"res={res.width}x{res.height}"
+                )
+            except Exception as exc:
+                print(f"[camera_manager] Warning: could not extract intrinsics for {name}: {exc}")
+
             print(f"[camera_manager] Opened {name} (serial {serial})")
 
     def close(self) -> None:
@@ -173,11 +209,13 @@ class CameraManager:
     # Frame retrieval (MJPEG streaming)
     # ------------------------------------------------------------------
 
-    def get_frame(self, camera_name: str) -> bytes | None:
+    def get_frame(self, camera_name: str, eye: str = "left") -> bytes | None:
         """Return a JPEG-encoded frame from *camera_name*, or ``None``.
 
-        * During recording the grab thread owns ``grab()``, so we just
-          read the most recently retrieved image.
+        *eye* must be ``"left"`` or ``"right"``.
+
+        * During recording the grab thread owns ``grab()``, so we
+          retrieve the requested view from the last grabbed frame.
         * When idle we call ``grab()`` ourselves (under lock).
         """
         cam = self.cameras.get(camera_name)
@@ -188,22 +226,19 @@ class CameraManager:
         if lock is None:
             return None
 
-        image = self._latest_images.get(camera_name)
-        if image is None:
-            image = sl.Mat()
-            self._latest_images[camera_name] = image
+        view = sl.VIEW.RIGHT if eye == "right" else sl.VIEW.LEFT
+        image = sl.Mat()
 
         if self.recording:
-            # The grab thread keeps _latest_images up to date.
             with lock:
+                cam.retrieve_image(image, view)
                 data = image.get_data()
         else:
-            # Not recording -- we drive grab() from here.
             with lock:
                 runtime = sl.RuntimeParameters()
                 if cam.grab(runtime) != sl.ERROR_CODE.SUCCESS:
                     return None
-                cam.retrieve_image(image, sl.VIEW.LEFT)
+                cam.retrieve_image(image, view)
                 data = image.get_data()
 
         if data is None:
@@ -215,6 +250,63 @@ class CameraManager:
         if not ok:
             return None
         return jpeg.tobytes()
+
+    # ------------------------------------------------------------------
+    # Intrinsics / camera info
+    # ------------------------------------------------------------------
+
+    def get_intrinsics(self, camera_name: str) -> dict | None:
+        """Return the ZED SDK intrinsics for a camera, or None."""
+        return self._intrinsics.get(camera_name)
+
+    def get_camera_info(self) -> dict:
+        """Return per-camera info (serial, resolution, fps) and SDK version."""
+        try:
+            sdk_version = str(sl.Camera().get_sdk_version())
+        except Exception:
+            sdk_version = "unknown"
+        return {
+            "cameras": self._camera_info,
+            "zed_sdk_version": sdk_version,
+        }
+
+    def capture_calibration_frame(self, camera_name: str) -> tuple[bytes | None, "np.ndarray | None"]:
+        """Grab a single frame and return (jpeg_bytes, bgr_numpy_array).
+
+        Used by the calibrator to get a frame for ChArUco detection.
+        Returns (None, None) if the camera is unavailable.
+        """
+        cam = self.cameras.get(camera_name)
+        if cam is None:
+            return None, None
+
+        lock = self._locks.get(camera_name)
+        if lock is None:
+            return None, None
+
+        image = sl.Mat()
+
+        if self.recording:
+            with lock:
+                cam.retrieve_image(image, sl.VIEW.LEFT)
+                data = image.get_data()
+        else:
+            with lock:
+                runtime = sl.RuntimeParameters()
+                if cam.grab(runtime) != sl.ERROR_CODE.SUCCESS:
+                    return None, None
+                cam.retrieve_image(image, sl.VIEW.LEFT)
+                data = image.get_data()
+
+        if data is None:
+            return None, None
+
+        # ZED SDK returns BGRA, convert to BGR for OpenCV
+        bgr = cv2.cvtColor(data, cv2.COLOR_BGRA2BGR)
+        ok, jpeg = cv2.imencode(".jpg", bgr, [cv2.IMWRITE_JPEG_QUALITY, 90])
+        if not ok:
+            return None, None
+        return jpeg.tobytes(), bgr
 
     # ------------------------------------------------------------------
     # Discovery / status

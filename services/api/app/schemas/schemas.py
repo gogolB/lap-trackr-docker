@@ -73,6 +73,60 @@ class SessionDetailOut(SessionOut):
 # ── ML Models ───────────────────────────────────────────────────────
 
 
+# ── Calibration ─────────────────────────────────────────────────────
+
+
+class BoardConfig(BaseModel):
+    rows: int
+    cols: int
+    square_size_mm: float
+    marker_size_mm: float
+    aruco_dict: str
+
+
+class CalibrationCaptureResult(BaseModel):
+    success: bool
+    markers_detected: int = 0
+    charuco_corners: int = 0
+    coverage_pct: float = 0.0
+    total_captures: int = 0
+    preview_jpeg_b64: str | None = None
+
+
+class CalibrationStatus(BaseModel):
+    total_captures: int = 0
+    board_config: BoardConfig
+
+
+class CalibrationOut(BaseModel):
+    id: UUID
+    camera_name: str
+    is_default: bool
+    session_id: UUID | None = None
+    fx: float
+    fy: float
+    cx: float
+    cy: float
+    image_width: int
+    image_height: int
+    extrinsic_matrix: list | None = None
+    board_rows: int
+    board_cols: int
+    square_size_mm: float
+    marker_size_mm: float
+    aruco_dict: str
+    reprojection_error: float | None = None
+    num_frames_used: int | None = None
+    is_global: bool = False
+    calibration_path: str | None = None
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+# ── ML Models ───────────────────────────────────────────────────────
+
+
 class MLModelOut(BaseModel):
     id: UUID
     slug: str
