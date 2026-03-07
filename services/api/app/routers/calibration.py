@@ -19,6 +19,13 @@ router = APIRouter(prefix="/calibration", tags=["calibration"])
 
 CAMERA_URL = settings.CAMERA_SERVICE_URL
 
+_VALID_CAMERA_NAMES = {"on_axis", "off_axis"}
+
+
+def _validate_camera_name(camera_name: str) -> None:
+    if camera_name not in _VALID_CAMERA_NAMES:
+        raise HTTPException(status_code=400, detail=f"Invalid camera_name '{camera_name}'. Must be one of: {', '.join(sorted(_VALID_CAMERA_NAMES))}")
+
 
 # ---------------------------------------------------------------------------
 # Proxy endpoints -- forward to camera service
@@ -30,6 +37,7 @@ async def capture_frame(
     current_user: User = Depends(get_current_user),
 ):
     """Capture a frame, detect ChArUco corners on the camera service."""
+    _validate_camera_name(camera_name)
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.post(f"{CAMERA_URL}/calibration/capture/{camera_name}")
@@ -49,6 +57,7 @@ async def compute_calibration(
     db: AsyncSession = Depends(get_db),
 ):
     """Compute extrinsic calibration and persist it."""
+    _validate_camera_name(camera_name)
     # Ask camera service to compute
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
@@ -125,6 +134,7 @@ async def reset_calibration(
     current_user: User = Depends(get_current_user),
 ):
     """Reset accumulated captures on the camera service."""
+    _validate_camera_name(camera_name)
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
             resp = await client.post(f"{CAMERA_URL}/calibration/reset/{camera_name}")
@@ -286,6 +296,7 @@ async def get_default_calibration(
     db: AsyncSession = Depends(get_db),
 ):
     """Get the default calibration for a specific camera."""
+    _validate_camera_name(camera_name)
     result = await db.execute(
         select(Calibration).where(
             Calibration.camera_name == camera_name,
@@ -305,6 +316,7 @@ async def delete_default_calibration(
     db: AsyncSession = Depends(get_db),
 ):
     """Delete the default calibration for a camera."""
+    _validate_camera_name(camera_name)
     result = await db.execute(
         select(Calibration).where(
             Calibration.camera_name == camera_name,

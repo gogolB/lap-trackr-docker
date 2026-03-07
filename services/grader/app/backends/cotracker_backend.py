@@ -136,5 +136,13 @@ class CoTrackerBackend(ModelBackend):
             return [[] for _ in frames]
 
     def unload(self) -> None:
-        self._model = None
+        if self._model is not None:
+            del self._model
+            self._model = None
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except ImportError:
+            pass
         logger.info("Co-Tracker v2 model unloaded")

@@ -8,15 +8,17 @@ import os
 import shutil
 import uuid
 
+import aiofiles
 import httpx
 import redis.asyncio as aioredis
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.auth import get_current_user
 from app.core.config import settings
 from app.core.database import get_db
-from app.models.models import MLModel, ModelStatus
+from app.models.models import MLModel, ModelStatus, User
 from app.schemas.schemas import MLModelDownloadProgress, MLModelOut
 
 logger = logging.getLogger("api.models")
@@ -109,7 +111,7 @@ async def _download_model(model_id: str, url: str, dest: str) -> None:
 
 
 @router.get("/", response_model=list[MLModelOut])
-async def list_models(db: AsyncSession = Depends(get_db)):
+async def list_models(current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(MLModel).order_by(MLModel.created_at))
     return result.scalars().all()
 
@@ -117,6 +119,7 @@ async def list_models(db: AsyncSession = Depends(get_db)):
 @router.post("/{model_id}/download", response_model=MLModelOut)
 async def download_model(
     model_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     model = await db.get(MLModel, model_id)
@@ -142,7 +145,7 @@ async def download_model(
 
 
 @router.get("/{model_id}/progress", response_model=MLModelDownloadProgress)
-async def download_progress(model_id: uuid.UUID):
+async def download_progress(model_id: uuid.UUID, current_user: User = Depends(get_current_user)):
     r = _get_redis()
     key = _progress_key(str(model_id))
     data = await r.hgetall(key)
@@ -167,6 +170,7 @@ async def download_progress(model_id: uuid.UUID):
 @router.post("/{model_id}/activate", response_model=MLModelOut)
 async def activate_model(
     model_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     model = await db.get(MLModel, model_id)
@@ -198,6 +202,7 @@ async def activate_model(
 @router.delete("/{model_id}", status_code=204)
 async def delete_model(
     model_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     model = await db.get(MLModel, model_id)
@@ -224,6 +229,7 @@ async def delete_model(
 @router.post("/upload", response_model=MLModelOut)
 async def upload_model(
     file: UploadFile = File(...),
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     if not file.filename or not file.filename.endswith(".pt"):
@@ -241,8 +247,8 @@ async def upload_model(
     dest = os.path.join(dest_dir, file.filename)
 
     content = await file.read()
-    with open(dest, "wb") as f:
-        f.write(content)
+    async with aiofiles.open(dest, "wb") as f:
+        await f.write(content)
 
     model = MLModel(
         slug=slug,

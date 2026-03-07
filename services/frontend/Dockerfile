@@ -22,4 +22,4 @@ COPY --from=builder /app/dist /app/_build
 
 # At runtime, clear the volume and copy fresh assets into it.
 # The volume is mounted at /app/dist by docker-compose.
-CMD ["sh", "-c", "rm -rf /app/dist/* 2>/dev/null; cp -r /app/_build/* /app/dist/ && echo 'Frontend build deployed to /app/dist'"]
+CMD ["sh", "-c", "cp -rT /app/_build /app/dist && echo 'Frontend build deployed to /app/dist'"]

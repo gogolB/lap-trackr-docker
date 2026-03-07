@@ -150,7 +150,7 @@ async def stop_session(
     result = await db.execute(
         select(Session).where(
             Session.id == session_id, Session.user_id == current_user.id
-        )
+        ).with_for_update()
     )
     session = result.scalar_one_or_none()
     if session is None:
@@ -189,8 +189,8 @@ async def stop_session(
         await r.aclose()
         session.status = SessionStatus.exporting
     except Exception:
-        logger.warning("Failed to enqueue export job, setting status to completed")
-        session.status = SessionStatus.completed
+        logger.warning("Failed to enqueue export job, setting status to export_failed")
+        session.status = SessionStatus.export_failed
 
     await db.commit()
     await db.refresh(session)
@@ -214,6 +214,12 @@ async def delete_session(
             status_code=status.HTTP_404_NOT_FOUND, detail="Session not found"
         )
 
+    if session.status in (SessionStatus.recording, SessionStatus.exporting, SessionStatus.grading):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Cannot delete session while status is '{session.status.value}'",
+        )
+
     # Remove session files from disk
     if session.on_axis_path:
         session_dir = str(Path(session.on_axis_path).parent)
@@ -233,7 +239,7 @@ async def grade_session(
     result = await db.execute(
         select(Session).where(
             Session.id == session_id, Session.user_id == current_user.id
-        )
+        ).with_for_update()
     )
     session = result.scalar_one_or_none()
     if session is None:
@@ -312,7 +318,13 @@ async def download_session(
             status_code=status.HTTP_404_NOT_FOUND, detail="No session files found"
         )
 
-    session_dir = Path(session.on_axis_path).parent
+    session_dir = Path(session.on_axis_path).parent.resolve()
+    allowed_prefix = Path(settings.DATA_DIR).resolve() / "users" / str(current_user.id)
+    if not str(session_dir).startswith(str(allowed_prefix)):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access denied",
+        )
     if not session_dir.exists():
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -323,7 +335,7 @@ async def download_session(
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         for file_path in sorted(session_dir.rglob("*")):
-            if file_path.is_file():
+            if file_path.is_file() and not file_path.is_symlink():
                 arcname = file_path.relative_to(session_dir)
                 zf.write(file_path, arcname)
     buf.seek(0)

@@ -11,7 +11,7 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.auth import get_current_user
+from app.core.auth import get_current_user, get_current_user_or_token
 from app.core.database import get_db
 from app.models.models import Session, SessionStatus, User
 
@@ -65,9 +65,8 @@ async def get_tip_init(
 async def get_sample_frame(
     session_id: UUID,
     filename: str,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user_or_token),
     db: AsyncSession = Depends(get_db),
-    token: str | None = None,
 ):
     """Serve a sample frame JPEG."""
     result = await db.execute(

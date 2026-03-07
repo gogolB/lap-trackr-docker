@@ -28,6 +28,30 @@ Capture and grade laparoscopic surgical training sessions using stereo cameras, 
 | **db** | PostgreSQL 15 |
 | **redis** | Redis 7. Job queue for grading |
 
+## Security
+
+### JWT Secret
+
+The API **refuses to start** if `JWT_SECRET` is left at a default/placeholder value. Generate a secret before first run:
+
+```bash
+python3 -c "import secrets; print(secrets.token_urlsafe(32))"
+```
+
+Set the result in your `.env` file.
+
+### CORS
+
+By default `CORS_ORIGINS=*` (no credentials). To restrict origins and enable credentials:
+
+```
+CORS_ORIGINS=http://localhost,https://your-domain.com
+```
+
+### Authentication
+
+All API endpoints (sessions, models, calibration, results) require a valid JWT Bearer token. The `/models/` endpoints are now authenticated — unauthenticated requests return 401.
+
 ## Running on the Jetson (production)
 
 Requires Jetson AGX Orin with JetPack 5.1.2+ and two ZED X cameras (GMSL2).

@@ -26,6 +26,9 @@ class CameraManager:
             "off_axis": config.ZED_SERIAL_OFF_AXIS,
         }
 
+        # Protects mutations to self.cameras, self._locks, self._latest_images
+        self._camera_lock = threading.RLock()
+
         # Per-camera lock protects grab/retrieve races between the
         # background recording thread and the MJPEG streaming endpoint.
         self._locks: dict[str, threading.Lock] = {}
@@ -110,12 +113,15 @@ class CameraManager:
         """Stop any active recording and close every camera."""
         if self.recording:
             self.stop_recording()
-        for name, cam in self.cameras.items():
-            print(f"[camera_manager] Closing {name}")
-            cam.close()
-        self.cameras.clear()
-        self._locks.clear()
-        self._latest_images.clear()
+        with self._camera_lock:
+            for name, cam in self.cameras.items():
+                print(f"[camera_manager] Closing {name}")
+                cam.close()
+            self.cameras.clear()
+            self._locks.clear()
+            self._latest_images.clear()
+        if self._grab_thread is not None and self._grab_thread.is_alive():
+            print("[camera_manager] WARNING: grab thread still alive after close")
 
     # ------------------------------------------------------------------
     # Configuration
@@ -146,10 +152,11 @@ class CameraManager:
 
         if serials_changed and not self.recording:
             print(f"[camera_manager] Serial change detected, re-opening cameras")
-            self.close()
-            self.serials["on_axis"] = new_on
-            self.serials["off_axis"] = new_off
-            self.open_cameras()
+            with self._camera_lock:
+                self.close()
+                self.serials["on_axis"] = new_on
+                self.serials["off_axis"] = new_off
+                self.open_cameras()
 
         print(
             f"[camera_manager] Config applied: swap_eyes={self._swap_eyes}, "
@@ -233,8 +240,11 @@ class CameraManager:
         can return it without a separate grab call.
         """
         runtime = sl.RuntimeParameters()
+        error_counts: dict[str, int] = {}
         while not self._grab_stop_event.is_set():
-            for name, cam in self.cameras.items():
+            with self._camera_lock:
+                camera_snapshot = list(self.cameras.items())
+            for name, cam in camera_snapshot:
                 lock = self._locks.get(name)
                 if lock is None:
                     continue
@@ -243,6 +253,12 @@ class CameraManager:
                         cam.retrieve_image(
                             self._latest_images[name], sl.VIEW.LEFT
                         )
+                        error_counts[name] = 0
+                    else:
+                        count = error_counts.get(name, 0) + 1
+                        error_counts[name] = count
+                        if count == 1 or count % 100 == 0:
+                            print(f"[camera_manager] grab error on {name} (count={count})")
             # Yield the CPU briefly so we don't spin at 100 %.
             # The ZED grab() itself blocks until the next frame is ready,
             # so this sleep is mainly a safety net.

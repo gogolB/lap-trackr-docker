@@ -11,6 +11,7 @@ class Settings(BaseSettings):
     MODELS_DIR: str = "/data/models"
     CALIBRATION_DIR: str = "/data/calibration"
     CAMERA_SERVICE_URL: str = "http://camera:8001"
+    CORS_ORIGINS: str = "*"
 
     class Config:
         env_file = ".env"

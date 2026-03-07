@@ -34,8 +34,12 @@ def main() -> None:
     while True:
         # BRPOP blocks until a job is available (timeout=0 means wait forever)
         _, raw = redis_client.brpop(QUEUE_KEY, timeout=0)
-        job: dict = json.loads(raw)
-        session_id: str = job["session_id"]
+        try:
+            job: dict = json.loads(raw)
+            session_id: str = job["session_id"]
+        except (json.JSONDecodeError, KeyError, TypeError) as exc:
+            logger.error("Malformed job message, skipping: %s (raw=%r)", exc, raw[:200] if raw else raw)
+            continue
         logger.info("Received job for session %s", session_id)
 
         try:

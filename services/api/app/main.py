@@ -5,12 +5,15 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import select
 
+from app.core.config import settings
 from app.core.database import async_session, engine
 from app.model_registry import MODEL_CATALOG
 from app.models.models import Base, MLModel, ModelStatus
 from app.routers import auth, calibration, camera_config, health, models, results, sessions, tip_init
 
 logger = logging.getLogger("api.startup")
+
+_INSECURE_JWT_SECRETS = {"change-me-in-production", "change-this-to-a-random-secret", "GENERATE_A_RANDOM_SECRET"}
 
 
 async def _seed_model_registry() -> None:
@@ -37,6 +40,12 @@ async def _seed_model_registry() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    if settings.JWT_SECRET in _INSECURE_JWT_SECRETS:
+        logger.critical(
+            "JWT_SECRET is set to an insecure default. "
+            "Generate a secret with: python3 -c \"import secrets; print(secrets.token_urlsafe(32))\""
+        )
+        raise SystemExit(1)
     # Create all tables on startup
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
@@ -47,10 +56,18 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="lap-trackr API", version="1.0.0", lifespan=lifespan)
 
+_cors_origins_raw = settings.CORS_ORIGINS.strip()
+if _cors_origins_raw == "*":
+    _cors_origins: list[str] = ["*"]
+    _cors_credentials = False
+else:
+    _cors_origins = [o.strip() for o in _cors_origins_raw.split(",") if o.strip()]
+    _cors_credentials = True
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=_cors_origins,
+    allow_credentials=_cors_credentials,
     allow_methods=["*"],
     allow_headers=["*"],
 )
