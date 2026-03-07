@@ -6,6 +6,7 @@ import json
 import logging
 import signal
 import sys
+import time
 import traceback
 from pathlib import Path
 
@@ -23,7 +24,33 @@ logger = logging.getLogger("grader.export_worker")
 
 QUEUE_KEY = "export_jobs"
 
+PROGRESS_KEY_PREFIX = "job_progress:"
+PROGRESS_TTL = 3600  # 1 hour
+
 _shutdown = False
+
+
+def _publish_progress(
+    redis_client: redis.Redis,
+    session_id: str,
+    stage: str,
+    current: int,
+    total: int,
+    detail: str = "",
+) -> None:
+    """Write job progress to a Redis hash for the API to read."""
+    key = f"{PROGRESS_KEY_PREFIX}{session_id}"
+    now = time.time()
+    pct = round(current / total * 100, 1) if total > 0 else 0
+    redis_client.hset(key, mapping={
+        "stage": stage,
+        "current": str(current),
+        "total": str(total),
+        "percent": str(pct),
+        "detail": detail,
+        "updated_at": str(now),
+    })
+    redis_client.expire(key, PROGRESS_TTL)
 
 
 def _handle_signal(signum, frame):
@@ -64,21 +91,36 @@ def main() -> None:
             all_sample_paths: list[str] = []
             session_dir: str | None = None
 
-            for key in ("on_axis_path", "off_axis_path"):
-                svo_path = job.get(key)
-                if svo_path and Path(svo_path).exists():
-                    logger.info("Exporting %s: %s", key, svo_path)
-                    result = export_svo2(svo_path)
-                    logger.info(
-                        "  Exported %d frames → %s",
-                        result["frame_count"],
-                        result["mp4_path"],
+            # Count how many cameras to export for progress tracking
+            cam_keys = [k for k in ("on_axis_path", "off_axis_path") if job.get(k) and Path(job[k]).exists()]
+            cam_total = len(cam_keys)
+
+            for cam_idx, key in enumerate(cam_keys):
+                svo_path = job[key]
+                cam_label = key.replace("_path", "")
+
+                def on_export_progress(frame: int, total: int, _ci=cam_idx, _ct=cam_total, _cl=cam_label) -> None:
+                    _publish_progress(
+                        redis_client, session_id,
+                        stage=f"exporting ({_cl.replace('_', ' ')} {_ci + 1}/{_ct})",
+                        current=frame, total=total,
+                        detail=f"{_cl} camera",
                     )
-                    all_sample_paths.extend(result.get("sample_paths", []))
-                    if session_dir is None:
-                        session_dir = str(Path(svo_path).parent)
+
+                logger.info("Exporting %s: %s", key, svo_path)
+                _publish_progress(redis_client, session_id, stage=f"exporting ({cam_label.replace('_', ' ')})", current=0, total=0, detail="starting")
+                result = export_svo2(svo_path, on_progress=on_export_progress)
+                logger.info(
+                    "  Exported %d frames → %s",
+                    result["frame_count"],
+                    result["mp4_path"],
+                )
+                all_sample_paths.extend(result.get("sample_paths", []))
+                if session_dir is None:
+                    session_dir = str(Path(svo_path).parent)
 
             # Run color detection on sample frames
+            _publish_progress(redis_client, session_id, stage="detecting tips", current=0, total=len(all_sample_paths))
             tip_detections: dict[str, list[dict]] = {}
             if session_dir and all_sample_paths:
                 import cv2
@@ -95,6 +137,7 @@ def main() -> None:
                 det_path.write_text(json.dumps(tip_detections, indent=2))
                 logger.info("Saved tip detections to %s", det_path)
 
+            _publish_progress(redis_client, session_id, stage="complete", current=1, total=1)
             update_session_status(session_id, "awaiting_init")
             logger.info("Session %s: export complete, status -> awaiting_init", session_id)
 

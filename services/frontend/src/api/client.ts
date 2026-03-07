@@ -112,6 +112,7 @@ export type SessionStatus =
 export interface Session {
   id: string;
   user_id: string;
+  name: string;
   status: SessionStatus;
   started_at: string;
   stopped_at: string | null;
@@ -142,9 +143,10 @@ export async function getSession(id: string): Promise<SessionDetail> {
   return request<SessionDetail>(`/api/sessions/${id}`);
 }
 
-export async function startSession(): Promise<Session> {
+export async function startSession(name?: string): Promise<Session> {
   return request<Session>("/api/sessions/start", {
     method: "POST",
+    body: JSON.stringify({ name: name || "" }),
   });
 }
 
@@ -158,6 +160,20 @@ export async function deleteSession(id: string): Promise<void> {
   return request<void>(`/api/sessions/${id}`, {
     method: "DELETE",
   });
+}
+
+export interface JobProgress {
+  session_id: string;
+  status: string;
+  stage: string | null;
+  current: number;
+  total: number;
+  percent: number;
+  detail: string;
+}
+
+export async function getSessionProgress(id: string): Promise<JobProgress> {
+  return request<JobProgress>(`/api/sessions/${id}/progress`);
 }
 
 export async function downloadSession(id: string): Promise<void> {

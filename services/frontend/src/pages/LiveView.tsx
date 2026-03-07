@@ -18,6 +18,21 @@ import {
 
 type ViewStatus = "idle" | "recording" | "stopping";
 
+type CameraFeed = "on_axis" | "off_axis";
+type EyeFeed = "left" | "right";
+
+interface VisibleFeed {
+  camera: CameraFeed;
+  eye: EyeFeed;
+}
+
+const ALL_FEEDS: VisibleFeed[] = [
+  { camera: "on_axis", eye: "left" },
+  { camera: "on_axis", eye: "right" },
+  { camera: "off_axis", eye: "left" },
+  { camera: "off_axis", eye: "right" },
+];
+
 export default function LiveView() {
   const [status, setStatus] = useState<ViewStatus>("idle");
   const [activeSession, setActiveSession] = useState<Session | null>(null);
@@ -25,6 +40,20 @@ export default function LiveView() {
   const [error, setError] = useState("");
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const navigate = useNavigate();
+
+  // Pre-record settings
+  const [sessionName, setSessionName] = useState("");
+  const [visibleCameras, setVisibleCameras] = useState<Set<CameraFeed>>(
+    new Set(["on_axis", "off_axis"])
+  );
+  const [visibleEyes, setVisibleEyes] = useState<Set<EyeFeed>>(
+    new Set(["left"])
+  );
+
+  const visibleFeeds = ALL_FEEDS.filter(
+    (f) => visibleCameras.has(f.camera) && visibleEyes.has(f.eye)
+  );
+  const gridCols = visibleFeeds.length <= 1 ? 1 : 2;
 
   // Calibration state
   const [calibOpen, setCalibOpen] = useState(false);
@@ -92,7 +121,7 @@ export default function LiveView() {
   const handleStart = useCallback(async () => {
     setError("");
     try {
-      const session = await startSession();
+      const session = await startSession(sessionName);
       setActiveSession(session);
       setStatus("recording");
       setElapsed(0);
@@ -101,7 +130,7 @@ export default function LiveView() {
         err instanceof Error ? err.message : "Failed to start recording."
       );
     }
-  }, []);
+  }, [sessionName]);
 
   const handleStop = useCallback(async () => {
     if (!activeSession) return;
@@ -221,46 +250,44 @@ export default function LiveView() {
         </div>
       )}
 
-      {/* 2x2 camera grid */}
-      <div className="grid grid-cols-2 gap-3">
-        {(["on_axis", "off_axis"] as const).map((cam) =>
-          (["left", "right"] as const).map((e) => (
-            <div key={`${cam}-${e}`} className="card overflow-hidden p-0">
-              <div className="relative aspect-video w-full bg-black">
-                <img
-                  src={`/ws/camera/stream/${cam}?eye=${e}`}
-                  alt={`${cam} ${e}`}
-                  className="h-full w-full object-contain"
-                  onError={(ev) => {
-                    (ev.target as HTMLImageElement).style.display = "none";
-                    const fallback = (ev.target as HTMLImageElement).nextElementSibling as HTMLElement | null;
-                    if (fallback?.dataset.fallback) fallback.style.display = "flex";
-                  }}
-                />
-                <div
-                  data-fallback="true"
-                  className="absolute inset-0 items-center justify-center text-sm text-slate-500"
-                  style={{ display: "none" }}
-                >
-                  Stream unavailable
-                </div>
-                {/* Label overlay */}
-                <div className="absolute left-2 top-2 rounded bg-black/60 px-2 py-1 text-xs font-medium text-white backdrop-blur-sm">
-                  {cam.replace("_", " ")} / {e}
-                </div>
-                {/* Recording indicator */}
-                {status === "recording" && cam === "on_axis" && e === "left" && (
-                  <div className="absolute right-2 top-2 flex items-center gap-1.5 rounded bg-black/60 px-2 py-1 backdrop-blur-sm">
-                    <span className="h-2 w-2 animate-pulse rounded-full bg-red-500" />
-                    <span className="font-mono text-xs font-bold text-white">
-                      REC {formatElapsed(elapsed)}
-                    </span>
-                  </div>
-                )}
+      {/* Camera grid — filtered by visibility settings */}
+      <div className={`grid gap-3 ${gridCols === 1 ? "grid-cols-1" : "grid-cols-2"}`}>
+        {visibleFeeds.map(({ camera: cam, eye: e }) => (
+          <div key={`${cam}-${e}`} className="card overflow-hidden p-0">
+            <div className="relative aspect-video w-full bg-black">
+              <img
+                src={`/ws/camera/stream/${cam}?eye=${e}`}
+                alt={`${cam} ${e}`}
+                className="h-full w-full object-contain"
+                onError={(ev) => {
+                  (ev.target as HTMLImageElement).style.display = "none";
+                  const fallback = (ev.target as HTMLImageElement).nextElementSibling as HTMLElement | null;
+                  if (fallback?.dataset.fallback) fallback.style.display = "flex";
+                }}
+              />
+              <div
+                data-fallback="true"
+                className="absolute inset-0 items-center justify-center text-sm text-slate-500"
+                style={{ display: "none" }}
+              >
+                Stream unavailable
               </div>
+              {/* Label overlay */}
+              <div className="absolute left-2 top-2 rounded bg-black/60 px-2 py-1 text-xs font-medium text-white backdrop-blur-sm">
+                {cam.replace("_", " ")} / {e}
+              </div>
+              {/* Recording indicator on first visible feed */}
+              {status === "recording" && visibleFeeds[0]?.camera === cam && visibleFeeds[0]?.eye === e && (
+                <div className="absolute right-2 top-2 flex items-center gap-1.5 rounded bg-black/60 px-2 py-1 backdrop-blur-sm">
+                  <span className="h-2 w-2 animate-pulse rounded-full bg-red-500" />
+                  <span className="font-mono text-xs font-bold text-white">
+                    REC {formatElapsed(elapsed)}
+                  </span>
+                </div>
+              )}
             </div>
-          ))
-        )}
+          </div>
+        ))}
       </div>
 
       {/* Controls row */}
@@ -270,6 +297,21 @@ export default function LiveView() {
           <h3 className="mb-3 text-sm font-semibold text-slate-300">
             Recording
           </h3>
+
+          {status === "idle" && (
+            <div className="mb-3">
+              <label className="mb-1 block text-xs font-medium text-slate-400">
+                Session Name
+              </label>
+              <input
+                type="text"
+                value={sessionName}
+                onChange={(ev) => setSessionName(ev.target.value)}
+                placeholder="e.g. Peg Transfer Practice"
+                className="w-full rounded-lg border border-slate-600 bg-slate-800 px-3 py-2 text-sm text-white placeholder-slate-500 focus:border-teal-500 focus:outline-none focus:ring-1 focus:ring-teal-500"
+              />
+            </div>
+          )}
 
           {status === "idle" ? (
             <button
@@ -307,8 +349,82 @@ export default function LiveView() {
               <p className="font-mono text-2xl font-bold text-white tabular-nums">
                 {formatElapsed(elapsed)}
               </p>
+              {activeSession && (
+                <p className="mt-1 truncate text-xs text-slate-400">
+                  {activeSession.name}
+                </p>
+              )}
             </div>
           )}
+        </div>
+
+        {/* View controls */}
+        <div className="card">
+          <h3 className="mb-3 text-sm font-semibold text-slate-300">
+            Camera Views
+          </h3>
+
+          <div className="mb-3">
+            <label className="mb-1.5 block text-xs font-medium text-slate-400">
+              Cameras
+            </label>
+            <div className="flex gap-2">
+              {(["on_axis", "off_axis"] as const).map((cam) => (
+                <button
+                  key={cam}
+                  onClick={() => {
+                    setVisibleCameras((prev) => {
+                      const next = new Set(prev);
+                      if (next.has(cam)) {
+                        if (next.size > 1) next.delete(cam);
+                      } else {
+                        next.add(cam);
+                      }
+                      return next;
+                    });
+                  }}
+                  className={`flex-1 rounded-lg px-3 py-1.5 text-xs font-medium transition-colors ${
+                    visibleCameras.has(cam)
+                      ? "bg-teal-600 text-white"
+                      : "bg-slate-700/50 text-slate-400 hover:bg-slate-700"
+                  }`}
+                >
+                  {cam.replace("_", " ")}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div>
+            <label className="mb-1.5 block text-xs font-medium text-slate-400">
+              Eyes
+            </label>
+            <div className="flex gap-2">
+              {(["left", "right"] as const).map((eye) => (
+                <button
+                  key={eye}
+                  onClick={() => {
+                    setVisibleEyes((prev) => {
+                      const next = new Set(prev);
+                      if (next.has(eye)) {
+                        if (next.size > 1) next.delete(eye);
+                      } else {
+                        next.add(eye);
+                      }
+                      return next;
+                    });
+                  }}
+                  className={`flex-1 rounded-lg px-3 py-1.5 text-xs font-medium transition-colors ${
+                    visibleEyes.has(eye)
+                      ? "bg-teal-600 text-white"
+                      : "bg-slate-700/50 text-slate-400 hover:bg-slate-700"
+                  }`}
+                >
+                  {eye}
+                </button>
+              ))}
+            </div>
+          </div>
         </div>
 
         {/* Calibration status */}

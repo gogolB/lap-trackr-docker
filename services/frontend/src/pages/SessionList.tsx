@@ -99,6 +99,9 @@ export default function SessionList() {
             <thead>
               <tr className="border-b border-slate-700/50 bg-slate-800/50">
                 <th className="px-6 py-3.5 text-left text-xs font-semibold uppercase tracking-wider text-slate-400">
+                  Name
+                </th>
+                <th className="px-6 py-3.5 text-left text-xs font-semibold uppercase tracking-wider text-slate-400">
                   Date
                 </th>
                 <th className="px-6 py-3.5 text-left text-xs font-semibold uppercase tracking-wider text-slate-400">
@@ -123,8 +126,11 @@ export default function SessionList() {
                       to={`/sessions/${session.id}`}
                       className="text-sm font-medium text-white hover:text-teal-400"
                     >
-                      {formatDate(session.started_at)}
+                      {session.name}
                     </Link>
+                  </td>
+                  <td className="px-6 py-4 text-sm text-slate-300">
+                    {formatDate(session.started_at)}
                   </td>
                   <td className="px-6 py-4 font-mono text-sm text-slate-300">
                     {formatDuration(getSessionDuration(session))}

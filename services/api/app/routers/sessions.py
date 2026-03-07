@@ -21,7 +21,7 @@ from app.core.auth import get_current_user
 from app.core.config import settings
 from app.core.database import get_db
 from app.models.models import Session, SessionStatus, User
-from app.schemas.schemas import SessionDetailOut, SessionOut
+from app.schemas.schemas import SessionDetailOut, SessionOut, SessionStartRequest
 
 router = APIRouter(prefix="/sessions", tags=["sessions"])
 logger = logging.getLogger("api.sessions")
@@ -65,6 +65,7 @@ async def get_session(
 
 @router.post("/start", response_model=SessionOut, status_code=status.HTTP_201_CREATED)
 async def start_session(
+    body: SessionStartRequest = SessionStartRequest(),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -74,8 +75,14 @@ async def start_session(
         Path(settings.DATA_DIR) / "users" / str(current_user.id) / timestamp
     )
 
+    # Generate default name if not provided
+    session_name = body.name.strip() if body.name else ""
+    if not session_name:
+        session_name = f"Session {now.strftime('%b %d, %Y %I:%M %p')}"
+
     session = Session(
         user_id=current_user.id,
+        name=session_name,
         started_at=now,
         status=SessionStatus.recording,
     )
@@ -306,6 +313,52 @@ async def grade_session(
     await db.commit()
     await db.refresh(session)
     return session
+
+
+@router.get("/{session_id}/progress")
+async def get_session_progress(
+    session_id: UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Return live progress for an in-flight export or grading job."""
+    result = await db.execute(
+        select(Session).where(
+            Session.id == session_id, Session.user_id == current_user.id
+        )
+    )
+    session = result.scalar_one_or_none()
+    if session is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Session not found"
+        )
+
+    r = redis.from_url(settings.REDIS_URL, decode_responses=True)
+    try:
+        data = await r.hgetall(f"job_progress:{session_id}")
+    finally:
+        await r.aclose()
+
+    if not data:
+        return {
+            "session_id": str(session_id),
+            "status": session.status.value,
+            "stage": None,
+            "current": 0,
+            "total": 0,
+            "percent": 0,
+            "detail": "",
+        }
+
+    return {
+        "session_id": str(session_id),
+        "status": session.status.value,
+        "stage": data.get("stage", ""),
+        "current": int(data.get("current", 0)),
+        "total": int(data.get("total", 0)),
+        "percent": float(data.get("percent", 0)),
+        "detail": data.get("detail", ""),
+    }
 
 
 @router.get("/{session_id}/download")

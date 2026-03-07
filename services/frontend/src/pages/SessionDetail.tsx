@@ -18,7 +18,9 @@ import {
   deleteSession,
   downloadSession,
   getSessionDuration,
+  getSessionProgress,
   type MetricsData,
+  type JobProgress,
   type SessionDetail as SessionDetailType,
 } from "../api/client";
 import StatusBadge from "../components/StatusBadge";
@@ -92,6 +94,15 @@ export default function SessionDetail() {
     queryKey: ["metrics", id],
     queryFn: () => getMetrics(id!),
     enabled: !!id && session?.status === "graded",
+  });
+
+  // Fetch live progress while exporting or grading
+  const isProcessing = session?.status === "exporting" || session?.status === "grading";
+  const { data: progress } = useQuery({
+    queryKey: ["progress", id],
+    queryFn: () => getSessionProgress(id!),
+    enabled: !!id && isProcessing,
+    refetchInterval: isProcessing ? 2000 : false,
   });
 
   const handleGrade = async () => {
@@ -184,7 +195,7 @@ export default function SessionDetail() {
           Sessions
         </Link>
         <span>/</span>
-        <span className="text-slate-200">Session Detail</span>
+        <span className="text-slate-200">{session.name}</span>
       </nav>
 
       {/* Session header */}
@@ -192,7 +203,7 @@ export default function SessionDetail() {
         <div className="flex flex-wrap items-start justify-between gap-4">
           <div className="space-y-2">
             <div className="flex items-center gap-3">
-              <h1 className="text-xl font-bold text-white">Session Details</h1>
+              <h1 className="text-xl font-bold text-white">{session.name}</h1>
               <StatusBadge status={session.status} />
             </div>
             <div className="flex flex-wrap items-center gap-x-6 gap-y-1 text-sm text-slate-400">
@@ -353,17 +364,45 @@ export default function SessionDetail() {
       {/* Exporting in progress */}
       {session.status === "exporting" && (
         <div className="card">
-          <div className="flex flex-col items-center gap-4 py-8">
-            <div className="h-10 w-10 animate-spin rounded-full border-3 border-orange-400/30 border-t-orange-400" />
-            <div className="text-center">
-              <p className="text-lg font-semibold text-white">
-                Exporting session files...
-              </p>
-              <p className="mt-1 text-sm text-slate-400">
-                Converting SVO2 recordings to MP4 + depth data. This page will
-                update automatically.
-              </p>
+          <div className="space-y-4 py-4">
+            <div className="flex items-center gap-3">
+              <div className="h-8 w-8 animate-spin rounded-full border-3 border-orange-400/30 border-t-orange-400" />
+              <div>
+                <p className="text-lg font-semibold text-white">
+                  Exporting session files...
+                </p>
+                <p className="text-sm text-slate-400">
+                  {progress?.detail || "Converting SVO2 recordings to MP4 + depth data"}
+                </p>
+              </div>
             </div>
+            {progress && progress.total > 0 && (
+              <div className="space-y-2">
+                <div className="flex items-center justify-between text-sm">
+                  <span className="text-slate-400">
+                    {progress.stage || "Processing"}
+                  </span>
+                  <span className="font-mono text-slate-300">
+                    {progress.current.toLocaleString()} / {progress.total.toLocaleString()} frames
+                  </span>
+                </div>
+                <div className="h-2.5 w-full overflow-hidden rounded-full bg-slate-700">
+                  <div
+                    className="h-full rounded-full bg-orange-400 transition-all duration-300"
+                    style={{ width: `${Math.min(progress.percent, 100)}%` }}
+                  />
+                </div>
+                <div className="flex items-center justify-between text-xs text-slate-500">
+                  <span>{progress.percent.toFixed(1)}% complete</span>
+                  <span>This page updates automatically</span>
+                </div>
+              </div>
+            )}
+            {(!progress || progress.total === 0) && (
+              <p className="text-sm text-slate-500">
+                Waiting for progress data...
+              </p>
+            )}
           </div>
         </div>
       )}
@@ -439,16 +478,45 @@ export default function SessionDetail() {
       {/* Grading in progress */}
       {session.status === "grading" && (
         <div className="card">
-          <div className="flex flex-col items-center gap-4 py-8">
-            <div className="h-10 w-10 animate-spin rounded-full border-3 border-purple-400/30 border-t-purple-400" />
-            <div className="text-center">
-              <p className="text-lg font-semibold text-white">
-                Grading in progress...
-              </p>
-              <p className="mt-1 text-sm text-slate-400">
-                This may take a few moments. The page will update automatically.
-              </p>
+          <div className="space-y-4 py-4">
+            <div className="flex items-center gap-3">
+              <div className="h-8 w-8 animate-spin rounded-full border-3 border-purple-400/30 border-t-purple-400" />
+              <div>
+                <p className="text-lg font-semibold text-white">
+                  Grading in progress...
+                </p>
+                <p className="text-sm text-slate-400">
+                  {progress?.detail || "Analyzing instrument movements and calculating metrics"}
+                </p>
+              </div>
             </div>
+            {progress && progress.total > 0 && (
+              <div className="space-y-2">
+                <div className="flex items-center justify-between text-sm">
+                  <span className="text-slate-400">
+                    {progress.stage || "Processing"}
+                  </span>
+                  <span className="font-mono text-slate-300">
+                    Step {progress.current} / {progress.total}
+                  </span>
+                </div>
+                <div className="h-2.5 w-full overflow-hidden rounded-full bg-slate-700">
+                  <div
+                    className="h-full rounded-full bg-purple-400 transition-all duration-300"
+                    style={{ width: `${Math.min(progress.percent, 100)}%` }}
+                  />
+                </div>
+                <div className="flex items-center justify-between text-xs text-slate-500">
+                  <span>{progress.percent.toFixed(1)}% complete</span>
+                  <span>This page updates automatically</span>
+                </div>
+              </div>
+            )}
+            {(!progress || progress.total === 0) && (
+              <p className="text-sm text-slate-500">
+                Waiting for progress data...
+              </p>
+            )}
           </div>
         </div>
       )}

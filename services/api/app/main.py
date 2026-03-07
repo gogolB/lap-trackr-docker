@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from app.core.config import settings
 from app.core.database import async_session, engine
@@ -49,6 +49,18 @@ async def lifespan(app: FastAPI):
     # Create all tables on startup
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+    # Lightweight migrations for new columns on existing tables
+    async with engine.begin() as conn:
+        # Add sessions.name if it doesn't exist yet
+        result = await conn.execute(text(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = 'sessions' AND column_name = 'name'"
+        ))
+        if result.first() is None:
+            await conn.execute(text(
+                "ALTER TABLE sessions ADD COLUMN name VARCHAR(255) NOT NULL DEFAULT 'Untitled Session'"
+            ))
+            logger.info("Migration: added 'name' column to sessions table")
     await _seed_model_registry()
     yield
     await engine.dispose()

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+from typing import Callable
 
 import cv2
 import numpy as np
@@ -15,7 +16,7 @@ import numpy as np
 logger = logging.getLogger("grader.exporter")
 
 
-def export_svo2(svo2_path: str) -> dict:
+def export_svo2(svo2_path: str, on_progress: Callable[[int, int], None] | None = None) -> dict:
     """Export a single SVO2 file to MP4 (left eye) + NPZ (depth).
 
     Parameters
@@ -47,6 +48,10 @@ def export_svo2(svo2_path: str) -> dict:
     status = zed.open(init)
     if status != sl.ERROR_CODE.SUCCESS:
         raise RuntimeError(f"Failed to open SVO2 '{svo2_path}': {status}")
+
+    total_frames = zed.get_svo_number_of_frames()
+    if total_frames <= 0:
+        total_frames = 0
 
     writer = None
     tmp_dir = session_dir / f".{cam_name}_depth_tmp"
@@ -97,6 +102,9 @@ def export_svo2(svo2_path: str) -> dict:
             depth_arr = depth.get_data().copy().astype(np.float32)
             depth_arrays[f"frame_{frame_idx:06d}"] = depth_arr
             frame_idx += 1
+
+            if on_progress and frame_idx % 10 == 0:
+                on_progress(frame_idx, total_frames)
 
             # Flush to disk every 100 frames to manage memory
             if len(depth_arrays) >= 100:

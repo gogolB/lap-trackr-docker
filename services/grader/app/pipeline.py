@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 
@@ -13,6 +13,8 @@ from app.metrics import calculate_metrics
 from app.model_loader import get_backend
 from app.pose_estimator import estimate_poses, estimate_poses_dual
 from app.svo_loader import load_svo2
+
+ProgressCallback = Callable[[str, int, int, str], None] | None
 
 logger = logging.getLogger("grader.pipeline")
 
@@ -110,7 +112,7 @@ def _load_off_axis_calibration(job: dict) -> dict | None:
         return None
 
 
-def run_pipeline(job: dict) -> dict[str, Any]:
+def run_pipeline(job: dict, on_progress: ProgressCallback = None) -> dict[str, Any]:
     """Run the full grading pipeline on a session's SVO2 files.
 
     Parameters
@@ -119,12 +121,18 @@ def run_pipeline(job: dict) -> dict[str, Any]:
         Must contain ``session_id``, ``on_axis_path`` and ``off_axis_path``.
         Optionally ``calibration_path``, ``stereo_calibration_path``,
         ``tip_init_path`` for enhanced tracking.
+    on_progress : callable, optional
+        ``(stage, current, total, detail)`` callback for live progress updates.
 
     Returns
     -------
     dict
         ``{"metrics": {...}, "poses": [...]}``
     """
+
+    def _progress(stage: str, current: int, total: int, detail: str = "") -> None:
+        if on_progress:
+            on_progress(stage, current, total, detail)
 
     on_axis_path: str = job["on_axis_path"]
     off_axis_path: str = job["off_axis_path"]
@@ -141,6 +149,7 @@ def run_pipeline(job: dict) -> dict[str, Any]:
     query_points = _load_query_points(job)
 
     # Stage 1 -- load SVO2 files and extract frames + depth maps.
+    _progress("loading frames", 0, 4, "on-axis camera")
     logger.info("Stage 1: Loading SVO2 from %s", on_axis_path)
     frames, depth_maps, fps = load_svo2(on_axis_path)
     logger.info(
@@ -150,11 +159,13 @@ def run_pipeline(job: dict) -> dict[str, Any]:
         fps,
     )
 
+    _progress("loading frames", 1, 4, "off-axis camera")
     logger.info("Stage 1b: Loading off-axis SVO2 from %s", off_axis_path)
     off_frames, off_depth, off_fps = load_svo2(off_axis_path)
     logger.info("  Off-axis: %d frames at %.1f fps", len(off_frames), off_fps)
 
     # Stage 2 -- instrument detection via active model backend.
+    _progress("detecting instruments", 2, 4, f"{len(frames)} on-axis frames")
     logger.info("Stage 2: Running instrument detection on %d frames", len(frames))
     backend = get_backend()
 
@@ -162,11 +173,13 @@ def run_pipeline(job: dict) -> dict[str, Any]:
     on_detections = backend.detect(frames, query_points=query_points)
     logger.info("  On-axis detections generated for %d frames", len(on_detections))
 
+    _progress("detecting instruments", 2, 4, f"{len(off_frames)} off-axis frames")
     # Run detection on off-axis camera (with query points if available)
     off_detections = backend.detect(off_frames, query_points=query_points)
     logger.info("  Off-axis detections generated for %d frames", len(off_detections))
 
     # Stage 3 -- 3D pose estimation
+    _progress("estimating poses", 3, 4)
     logger.info("Stage 3: Estimating 3D poses")
     if stereo_calibration and on_calibration and off_calibration:
         logger.info("  Using dual-camera fusion")
@@ -186,6 +199,7 @@ def run_pipeline(job: dict) -> dict[str, Any]:
     logger.info("  Estimated %d pose records", len(poses_3d))
 
     # Stage 4 -- calculate skill metrics.
+    _progress("calculating metrics", 4, 4)
     logger.info("Stage 4: Calculating metrics")
     metrics = calculate_metrics(poses_3d, fps)
     logger.info("  Metrics: %s", metrics)

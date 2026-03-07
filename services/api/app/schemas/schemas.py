@@ -53,9 +53,14 @@ class GradingResultOut(BaseModel):
 # ── Sessions ─────────────────────────────────────────────────────────
 
 
+class SessionStartRequest(BaseModel):
+    name: str = ""
+
+
 class SessionOut(BaseModel):
     id: UUID
     user_id: UUID
+    name: str
     started_at: datetime
     stopped_at: datetime | None = None
     status: SessionStatus
