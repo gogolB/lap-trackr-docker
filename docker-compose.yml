@@ -7,7 +7,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB}
     volumes:
-      - /data/postgres:/var/lib/postgresql/data
+      - /Users/duncan/Documents/postgres:/var/lib/postgresql/data
     ports:
       - "5432:5432"
     healthcheck:
@@ -20,7 +20,7 @@ services:
     image: redis:7-bookworm
     restart: unless-stopped
     volumes:
-      - /data/redis:/data
+      - /Users/duncan/Documents/redis:/data
     ports:
       - "6379:6379"
     healthcheck:
@@ -45,7 +45,7 @@ services:
       CALIBRATION_DIR: ${CALIBRATION_DIR:-/data/calibration}
       CAMERA_SERVICE_URL: http://camera:8001
     volumes:
-      - /data:/data
+      - /Users/duncan/Documents:/data
     ports:
       - "8000:8000"
     healthcheck:
@@ -81,7 +81,7 @@ services:
       CHARUCO_DICT: ${CHARUCO_DICT:-DICT_5X5_50}
       CALIBRATION_DIR: ${CALIBRATION_DIR:-/data/calibration}
     volumes:
-      - /data:/data
+      - /Users/duncan/Documents:/data
       - /tmp:/tmp
       - /dev:/dev
       - /var/nvidia/nvcam/settings:/var/nvidia/nvcam/settings
@@ -108,7 +108,7 @@ services:
       DATA_DIR: ${DATA_DIR}
       MODELS_DIR: ${MODELS_DIR:-/data/models}
     volumes:
-      - /data:/data
+      - /Users/duncan/Documents:/data
       - /usr/local/zed:/usr/local/zed
     depends_on:
       redis:
