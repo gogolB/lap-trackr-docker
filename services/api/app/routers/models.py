@@ -27,6 +27,7 @@ logger = logging.getLogger("api.models")
 router = APIRouter(prefix="/models", tags=["models"])
 
 MODELS_DIR = settings.MODELS_DIR
+MAX_UPLOAD_SIZE = 500 * 1024 * 1024  # 500 MB
 
 
 # ---------------------------------------------------------------------------
@@ -261,9 +262,21 @@ async def upload_model(
     if not os.path.realpath(dest).startswith(os.path.realpath(dest_dir)):
         raise HTTPException(400, "Invalid filename")
 
-    content = await file.read()
+    total_size = 0
+    too_large = False
     async with aiofiles.open(dest, "wb") as f:
-        await f.write(content)
+        while True:
+            chunk = await file.read(256 * 1024)
+            if not chunk:
+                break
+            total_size += len(chunk)
+            if total_size > MAX_UPLOAD_SIZE:
+                too_large = True
+                break
+            await f.write(chunk)
+    if too_large:
+        os.unlink(dest)
+        raise HTTPException(413, f"File too large (max {MAX_UPLOAD_SIZE // (1024 * 1024)}MB)")
 
     model = MLModel(
         slug=slug,
@@ -271,7 +284,7 @@ async def upload_model(
         model_type="yolo",
         description=f"Custom uploaded YOLO model: {safe_filename}",
         file_path=dest,
-        file_size_bytes=len(content),
+        file_size_bytes=total_size,
         status=ModelStatus.custom,
         is_custom=True,
     )

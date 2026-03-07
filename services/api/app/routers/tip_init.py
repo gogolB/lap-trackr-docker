@@ -1,5 +1,6 @@
 """Tip initialization endpoints -- serves sample frames and manages tip positions."""
 
+import asyncio
 import json
 import logging
 from pathlib import Path
@@ -124,7 +125,7 @@ async def update_tip_init(
 
     # Save tip_init.json
     init_path = session_dir / "tip_init.json"
-    init_path.write_text(json.dumps(body.tips, indent=2))
+    await asyncio.to_thread(init_path.write_text, json.dumps(body.tips, indent=2))
     logger.info("Saved tip init to %s", init_path)
 
     # Advance status

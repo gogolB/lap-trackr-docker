@@ -72,6 +72,11 @@ def export_svo2(svo2_path: str) -> dict:
                 fps,
                 (w, h),
             )
+        if not writer.isOpened():
+            raise RuntimeError(
+                f"Failed to create VideoWriter for '{mp4_path}': "
+                "both avc1 and mp4v codecs failed"
+            )
 
         image = sl.Mat()
         depth = sl.Mat()
@@ -89,7 +94,7 @@ def export_svo2(svo2_path: str) -> dict:
             bgr = image.get_data()[:, :, :3].copy()
             writer.write(bgr)
 
-            depth_arr = depth.get_data().copy().astype(np.float16)
+            depth_arr = depth.get_data().copy().astype(np.float32)
             depth_arrays[f"frame_{frame_idx:06d}"] = depth_arr
             frame_idx += 1
 
@@ -137,11 +142,20 @@ def export_svo2(svo2_path: str) -> dict:
         }
     finally:
         if writer is not None:
-            writer.release()
-        zed.close()
-        if tmp_dir.exists():
-            import shutil
-            shutil.rmtree(str(tmp_dir), ignore_errors=True)
+            try:
+                writer.release()
+            except Exception:
+                logger.warning("Failed to release VideoWriter", exc_info=True)
+        try:
+            zed.close()
+        except Exception:
+            logger.warning("Failed to close ZED camera", exc_info=True)
+        try:
+            if tmp_dir.exists():
+                import shutil
+                shutil.rmtree(str(tmp_dir), ignore_errors=True)
+        except Exception:
+            logger.warning("Failed to clean up temp dir %s", tmp_dir, exc_info=True)
 
 
 def _extract_sample_frames(

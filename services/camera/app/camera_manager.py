@@ -125,6 +125,9 @@ class CameraManager:
         """Stop any active recording and close every camera."""
         if self.recording:
             self.stop_recording()
+        # Ensure grab thread is fully stopped before clearing state,
+        # so the thread cannot access cleared dicts.
+        self._stop_grab_thread()
         with self._camera_lock:
             for name, cam in self.cameras.items():
                 print(f"[camera_manager] Closing {name}")
@@ -165,12 +168,10 @@ class CameraManager:
 
         if serials_changed and not self.recording:
             print(f"[camera_manager] Serial change detected, re-opening cameras")
-            self._stop_grab_thread()
-            with self._camera_lock:
-                self.close()
-                self.serials["on_axis"] = new_on
-                self.serials["off_axis"] = new_off
-                self.open_cameras()
+            self.close()
+            self.serials["on_axis"] = new_on
+            self.serials["off_axis"] = new_off
+            self.open_cameras()
 
         print(
             f"[camera_manager] Config applied: swap_eyes={self._swap_eyes}, "
@@ -262,11 +263,12 @@ class CameraManager:
                 lock = self._locks.get(name)
                 if lock is None:
                     continue
+                image = self._latest_images.get(name)
+                if image is None:
+                    continue
                 with lock:
                     if cam.grab(runtime) == sl.ERROR_CODE.SUCCESS:
-                        cam.retrieve_image(
-                            self._latest_images[name], sl.VIEW.LEFT
-                        )
+                        cam.retrieve_image(image, sl.VIEW.LEFT)
                         error_counts[name] = 0
                     else:
                         count = error_counts.get(name, 0) + 1

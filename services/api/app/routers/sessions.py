@@ -1,7 +1,9 @@
-import io
+import asyncio
 import json
 import logging
+import os
 import shutil
+import tempfile
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -9,7 +11,7 @@ from uuid import UUID
 
 import httpx
 import redis.asyncio as redis
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -29,11 +31,15 @@ logger = logging.getLogger("api.sessions")
 async def list_sessions(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    skip: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=200),
 ):
     result = await db.execute(
         select(Session)
         .where(Session.user_id == current_user.id)
         .order_by(Session.created_at.desc())
+        .offset(skip)
+        .limit(limit)
     )
     return result.scalars().all()
 
@@ -78,21 +84,21 @@ async def start_session(
     await db.refresh(session)
 
     # Create the session directory on disk
-    Path(session_dir).mkdir(parents=True, exist_ok=True)
+    await asyncio.to_thread(Path(session_dir).mkdir, parents=True, exist_ok=True)
 
     # Copy global default calibrations into session dir
     for cam in ("on_axis", "off_axis"):
         default_path = Path(settings.CALIBRATION_DIR) / "default" / f"{cam}.json"
         if default_path.exists():
             dest = Path(session_dir) / f"calibration_{cam}.json"
-            shutil.copy2(str(default_path), str(dest))
+            await asyncio.to_thread(shutil.copy2, str(default_path), str(dest))
             logger.info("Copied default calibration for %s into session dir", cam)
 
     # Copy stereo calibration if available
     stereo_path = Path(settings.CALIBRATION_DIR) / "default" / "stereo_calibration.json"
     if stereo_path.exists():
         dest = Path(session_dir) / "stereo_calibration.json"
-        shutil.copy2(str(stereo_path), str(dest))
+        await asyncio.to_thread(shutil.copy2, str(stereo_path), str(dest))
         logger.info("Copied stereo calibration into session dir")
 
     # Write session_metadata.json
@@ -114,8 +120,9 @@ async def start_session(
     except Exception as exc:
         logger.warning("Could not fetch camera info for metadata: %s", exc)
 
-    (Path(session_dir) / "session_metadata.json").write_text(
-        json.dumps(metadata, indent=2)
+    metadata_json = json.dumps(metadata, indent=2)
+    await asyncio.to_thread(
+        (Path(session_dir) / "session_metadata.json").write_text, metadata_json
     )
 
     # Call the camera service to start recording
@@ -337,20 +344,41 @@ async def download_session(
             detail="Session directory not found on disk",
         )
 
-    # Build ZIP in memory
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        for file_path in sorted(session_dir.rglob("*")):
-            if file_path.is_file() and not file_path.is_symlink():
-                arcname = file_path.relative_to(session_dir)
-                zf.write(file_path, arcname)
-    buf.seek(0)
+    # Build ZIP on disk to avoid OOM on large sessions
+    tmp_path = await asyncio.to_thread(_build_session_zip, session_dir)
 
     timestamp = session.started_at.strftime("%Y-%m-%d_%H-%M-%S")
     filename = f"session_{timestamp}.zip"
 
+    def stream_and_cleanup():
+        try:
+            with open(tmp_path, "rb") as f:
+                while True:
+                    chunk = f.read(64 * 1024)
+                    if not chunk:
+                        break
+                    yield chunk
+        finally:
+            os.unlink(tmp_path)
+
     return StreamingResponse(
-        buf,
+        stream_and_cleanup(),
         media_type="application/zip",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+
+def _build_session_zip(session_dir: Path) -> str:
+    """Build ZIP on disk, return temp file path."""
+    fd, tmp_path = tempfile.mkstemp(suffix=".zip")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            with zipfile.ZipFile(f, "w", zipfile.ZIP_DEFLATED) as zf:
+                for file_path in sorted(session_dir.rglob("*")):
+                    if file_path.is_file() and not file_path.is_symlink():
+                        arcname = file_path.relative_to(session_dir)
+                        zf.write(file_path, arcname)
+    except Exception:
+        os.unlink(tmp_path)
+        raise
+    return tmp_path

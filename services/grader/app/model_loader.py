@@ -84,6 +84,17 @@ def get_backend() -> ModelBackend:
     logger.info("Loading backend: type=%s, id=%s, path=%s", model_type, model_id, file_path)
     cls = _get_backend_class(model_type)
     backend = cls()
-    backend.load(file_path)
+    try:
+        backend.load(file_path)
+    except Exception:
+        logger.exception("Failed to load backend %s (id=%s), falling back to placeholder", model_type, model_id)
+        try:
+            backend.unload()
+        except Exception:
+            logger.warning("Failed to unload partially-initialized backend", exc_info=True)
+        placeholder = PlaceholderBackend()
+        placeholder.load("")
+        _cached = (None, placeholder)
+        return placeholder
     _cached = (model_id, backend)
     return backend

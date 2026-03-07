@@ -1,5 +1,6 @@
 """Calibration router -- proxies capture/compute to camera service, persists to DB."""
 
+import asyncio
 import json
 from pathlib import Path
 from uuid import UUID
@@ -78,10 +79,10 @@ async def compute_calibration(
     calibration_path = None
     if save_as_default:
         default_dir = Path(settings.CALIBRATION_DIR) / "default"
-        default_dir.mkdir(parents=True, exist_ok=True)
+        await asyncio.to_thread(default_dir.mkdir, parents=True, exist_ok=True)
         cal_file = default_dir / f"{camera_name}.json"
         calibration_data["is_global"] = True
-        cal_file.write_text(json.dumps(calibration_data, indent=2))
+        await asyncio.to_thread(cal_file.write_text, json.dumps(calibration_data, indent=2))
         calibration_path = str(cal_file)
 
     # Remove old default for this camera if saving as default
@@ -180,7 +181,7 @@ async def compute_stereo_calibration(
         raise HTTPException(status_code=502, detail=f"Camera service error: {exc}")
 
     default_dir = Path(settings.CALIBRATION_DIR) / "default"
-    default_dir.mkdir(parents=True, exist_ok=True)
+    await asyncio.to_thread(default_dir.mkdir, parents=True, exist_ok=True)
 
     # Save per-camera calibration files and DB records
     for camera_name in ("on_axis", "off_axis"):
@@ -194,7 +195,7 @@ async def compute_stereo_calibration(
         if save_as_default:
             calibration_data["is_global"] = True
             cal_file = default_dir / f"{camera_name}.json"
-            cal_file.write_text(json.dumps(calibration_data, indent=2))
+            await asyncio.to_thread(cal_file.write_text, json.dumps(calibration_data, indent=2))
             calibration_path = str(cal_file)
 
             # Remove old default for this camera
@@ -237,7 +238,7 @@ async def compute_stereo_calibration(
     # Save stereo calibration JSON
     if save_as_default:
         stereo_file = default_dir / "stereo_calibration.json"
-        stereo_file.write_text(json.dumps(stereo_data["stereo"], indent=2))
+        await asyncio.to_thread(stereo_file.write_text, json.dumps(stereo_data["stereo"], indent=2))
 
     await db.commit()
     return stereo_data
