@@ -3,20 +3,19 @@ import { useNavigate } from "react-router-dom";
 import {
   startSession,
   stopSession,
-  captureCalibrationFrame,
-  computeCalibration,
-  resetCalibration,
+  captureStereoCalibrationFrame,
+  computeStereoCalibration,
+  resetStereoCalibration,
   getCalibrationStatus,
   getDefaultCalibrations,
   type Session,
-  type CalibrationCaptureResult,
-  type CalibrationData,
+  type StereoCaptureResult,
+  type StereoCalibrationResult,
   type CalibrationStatus,
   type CalibrationDefault,
   type BoardConfig,
 } from "../api/client";
 
-type CameraName = "on_axis" | "off_axis";
 type ViewStatus = "idle" | "recording" | "stopping";
 
 export default function LiveView() {
@@ -29,10 +28,9 @@ export default function LiveView() {
 
   // Calibration state
   const [calibOpen, setCalibOpen] = useState(false);
-  const [calibCamera, setCalibCamera] = useState<CameraName>("on_axis");
   const [captures, setCaptures] = useState(0);
-  const [lastCapture, setLastCapture] = useState<CalibrationCaptureResult | null>(null);
-  const [calibResult, setCalibResult] = useState<CalibrationData | null>(null);
+  const [lastCapture, setLastCapture] = useState<StereoCaptureResult | null>(null);
+  const [calibResult, setCalibResult] = useState<StereoCalibrationResult | null>(null);
   const [calibError, setCalibError] = useState("");
   const [calibLoading, setCalibLoading] = useState(false);
   const [calibStatus, setCalibStatus] = useState<CalibrationStatus | null>(null);
@@ -73,7 +71,7 @@ export default function LiveView() {
       ]);
       setCalibStatus(statusData);
       setDefaults(defaultsData);
-      const camStatus = statusData[calibCamera];
+      const camStatus = statusData["on_axis"];
       if (camStatus) {
         setCaptures(camStatus.total_captures);
         setBoardConfig(camStatus.board_config);
@@ -82,22 +80,6 @@ export default function LiveView() {
       // Ignore - status is optional
     }
   };
-
-  // Reset calibration state when switching calibration camera
-  useEffect(() => {
-    setLastCapture(null);
-    setCalibResult(null);
-    setCalibError("");
-    if (calibStatus) {
-      const camStatus = calibStatus[calibCamera];
-      if (camStatus) {
-        setCaptures(camStatus.total_captures);
-        setBoardConfig(camStatus.board_config);
-      } else {
-        setCaptures(0);
-      }
-    }
-  }, [calibCamera]);
 
   const formatElapsed = (seconds: number): string => {
     const mins = Math.floor(seconds / 60);
@@ -140,11 +122,16 @@ export default function LiveView() {
     setCalibError("");
     setCalibLoading(true);
     try {
-      const result = await captureCalibrationFrame(calibCamera);
+      const result = await captureStereoCalibrationFrame();
       setLastCapture(result);
-      setCaptures(result.total_captures);
-      if (!result.success) {
-        setCalibError("No ChArUco corners detected. Adjust the board position.");
+      // Use on_axis capture count as representative
+      setCaptures(result.on_axis.total_captures);
+      if (!result.on_axis.success && !result.off_axis.success) {
+        setCalibError("No ChArUco corners detected on either camera. Adjust the board position.");
+      } else if (!result.on_axis.success) {
+        setCalibError("No corners detected on on-axis camera.");
+      } else if (!result.off_axis.success) {
+        setCalibError("No corners detected on off-axis camera.");
       }
     } catch (err) {
       setCalibError(
@@ -159,7 +146,7 @@ export default function LiveView() {
     setCalibError("");
     setCalibLoading(true);
     try {
-      const result = await computeCalibration(calibCamera, true);
+      const result = await computeStereoCalibration(true);
       setCalibResult(result);
       await refreshCalibStatus();
     } catch (err) {
@@ -174,7 +161,7 @@ export default function LiveView() {
   const handleReset = async () => {
     setCalibError("");
     try {
-      await resetCalibration(calibCamera);
+      await resetStereoCalibration();
       setCaptures(0);
       setLastCapture(null);
       setCalibResult(null);
@@ -341,12 +328,12 @@ export default function LiveView() {
         </div>
       </div>
 
-      {/* Calibration panel (collapsible) */}
+      {/* Stereo Calibration panel (collapsible) */}
       {calibOpen && (
         <div className="card">
           <div className="mb-4 flex items-center justify-between">
             <h2 className="text-lg font-semibold text-white">
-              ChArUco Board Calibration
+              Stereo ChArUco Calibration
             </h2>
             <button
               onClick={() => setCalibOpen(false)}
@@ -356,27 +343,9 @@ export default function LiveView() {
             </button>
           </div>
 
-          {/* Camera selector for calibration */}
-          <div className="mb-4 flex items-center gap-4">
-            <label className="text-sm font-medium text-slate-400">
-              Calibrate:
-            </label>
-            <div className="flex gap-2">
-              {(["on_axis", "off_axis"] as CameraName[]).map((cam) => (
-                <button
-                  key={cam}
-                  onClick={() => setCalibCamera(cam)}
-                  className={`rounded-lg px-3 py-1.5 text-sm font-medium transition-colors ${
-                    calibCamera === cam
-                      ? "bg-teal-600 text-white"
-                      : "bg-slate-700/50 text-slate-300 hover:bg-slate-700"
-                  }`}
-                >
-                  {cam === "on_axis" ? "On-Axis" : "Off-Axis"}
-                </button>
-              ))}
-            </div>
-          </div>
+          <p className="mb-4 text-sm text-slate-400">
+            Hold the ChArUco board visible to both cameras simultaneously. Each capture detects corners on both cameras at once.
+          </p>
 
           {/* Board config display */}
           {boardConfig && (
@@ -450,7 +419,7 @@ export default function LiveView() {
                   />
                 </svg>
               )}
-              Capture Frame
+              Capture Both Cameras
             </button>
 
             <div className="flex items-center gap-2">
@@ -477,7 +446,7 @@ export default function LiveView() {
                   : "cursor-not-allowed bg-slate-700/30 text-slate-500"
               }`}
             >
-              Compute Calibration
+              Compute Stereo Calibration
             </button>
 
             <button
@@ -488,62 +457,88 @@ export default function LiveView() {
             </button>
           </div>
 
-          {/* Last capture preview */}
-          {lastCapture && lastCapture.preview_jpeg_b64 && (
-            <div className="mb-4">
-              <h4 className="mb-2 text-sm font-medium text-slate-400">
-                Last Capture Preview
-                {lastCapture.success && (
-                  <span className="ml-2 text-emerald-400">
-                    {lastCapture.charuco_corners} corners detected (
-                    {lastCapture.coverage_pct}% coverage)
-                  </span>
-                )}
-              </h4>
-              <img
-                src={`data:image/jpeg;base64,${lastCapture.preview_jpeg_b64}`}
-                alt="Calibration preview"
-                className="max-h-64 rounded-lg border border-slate-700"
-              />
+          {/* Side-by-side last capture previews */}
+          {lastCapture && (
+            <div className="mb-4 grid grid-cols-2 gap-4">
+              {(["on_axis", "off_axis"] as const).map((cam) => {
+                const cap = lastCapture[cam];
+                return (
+                  <div key={cam}>
+                    <h4 className="mb-2 text-sm font-medium text-slate-400">
+                      {cam.replace("_", " ")}
+                      {cap.success ? (
+                        <span className="ml-2 text-emerald-400">
+                          {cap.charuco_corners} corners ({cap.coverage_pct}%)
+                        </span>
+                      ) : (
+                        <span className="ml-2 text-red-400">No corners</span>
+                      )}
+                    </h4>
+                    {cap.preview_jpeg_b64 && (
+                      <img
+                        src={`data:image/jpeg;base64,${cap.preview_jpeg_b64}`}
+                        alt={`${cam} calibration preview`}
+                        className="max-h-48 rounded-lg border border-slate-700"
+                      />
+                    )}
+                  </div>
+                );
+              })}
             </div>
           )}
 
-          {/* Calibration result */}
+          {/* Stereo calibration result */}
           {calibResult && (
             <div className="rounded-lg border border-emerald-700/50 bg-emerald-900/10 p-4">
               <h4 className="mb-2 text-sm font-semibold text-emerald-400">
-                Calibration Computed Successfully
+                Stereo Calibration Computed Successfully
               </h4>
               <div className="grid grid-cols-2 gap-4 text-sm">
-                <div>
-                  <span className="text-slate-400">Reprojection error:</span>{" "}
-                  <span className="font-mono text-white">
-                    {calibResult.quality.reprojection_error.toFixed(4)} px
-                  </span>
-                </div>
-                <div>
-                  <span className="text-slate-400">Frames used:</span>{" "}
-                  <span className="font-mono text-white">
-                    {calibResult.quality.num_frames_used}
-                  </span>
-                </div>
-                <div>
-                  <span className="text-slate-400">Intrinsics:</span>{" "}
-                  <span className="font-mono text-white">
-                    fx={calibResult.intrinsics.fx.toFixed(1)} fy=
-                    {calibResult.intrinsics.fy.toFixed(1)}
-                  </span>
-                </div>
-                <div>
-                  <span className="text-slate-400">Resolution:</span>{" "}
-                  <span className="font-mono text-white">
-                    {calibResult.intrinsics.image_width}x
-                    {calibResult.intrinsics.image_height}
-                  </span>
-                </div>
+                {(["on_axis", "off_axis"] as const).map((cam) => {
+                  const camResult = calibResult[cam];
+                  const err = calibResult.stereo[
+                    `${cam}_reprojection_error` as keyof typeof calibResult.stereo
+                  ] as number;
+                  return (
+                    <div key={cam} className="space-y-1">
+                      <p className="font-medium text-slate-200">
+                        {cam.replace("_", " ")}
+                      </p>
+                      <div className="flex items-center gap-2">
+                        <span className="text-slate-400">Reproj error:</span>
+                        <span
+                          className={`font-mono ${
+                            err < 0.5
+                              ? "text-emerald-400"
+                              : err < 1.0
+                              ? "text-amber-400"
+                              : "text-red-400"
+                          }`}
+                        >
+                          {err.toFixed(4)} px
+                        </span>
+                        <span
+                          className={`h-2 w-2 rounded-full ${
+                            err < 0.5
+                              ? "bg-emerald-400"
+                              : err < 1.0
+                              ? "bg-amber-400"
+                              : "bg-red-400"
+                          }`}
+                        />
+                      </div>
+                      <div>
+                        <span className="text-slate-400">Frames:</span>{" "}
+                        <span className="font-mono text-white">
+                          {camResult.quality.num_frames_used}
+                        </span>
+                      </div>
+                    </div>
+                  );
+                })}
               </div>
               <p className="mt-2 text-xs text-slate-500">
-                Saved as global default. Will be copied into future sessions.
+                Stereo transform and per-camera calibrations saved as defaults.
               </p>
             </div>
           )}

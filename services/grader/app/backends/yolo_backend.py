@@ -25,7 +25,7 @@ class YOLOBackend(ModelBackend):
         self._model = YOLO(path)
         logger.info("YOLO model loaded")
 
-    def detect(self, frames: list[np.ndarray]) -> list[list[Detection]]:
+    def detect(self, frames: list[np.ndarray], query_points: np.ndarray | None = None) -> list[list[Detection]]:
         if not frames or self._model is None:
             return [[] for _ in frames]
 

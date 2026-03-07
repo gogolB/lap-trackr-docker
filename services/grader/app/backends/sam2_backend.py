@@ -37,7 +37,7 @@ class SAM2Backend(ModelBackend):
             logger.error("Failed to load SAM 2: %s", exc)
             raise
 
-    def detect(self, frames: list[np.ndarray]) -> list[list[Detection]]:
+    def detect(self, frames: list[np.ndarray], query_points: np.ndarray | None = None) -> list[list[Detection]]:
         """Segment instruments and derive tip positions from mask extrema.
 
         Falls back to empty detections if inference fails.

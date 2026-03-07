@@ -25,6 +25,7 @@ class SessionStatus(str, enum.Enum):
     completed = "completed"
     exporting = "exporting"
     export_failed = "export_failed"
+    awaiting_init = "awaiting_init"
     grading = "grading"
     graded = "graded"
     failed = "failed"

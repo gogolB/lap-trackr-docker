@@ -1,8 +1,8 @@
-"""Co-Tracker point tracking backend.
+"""Co-Tracker v2 point tracking backend.
 
-Co-Tracker tracks user-specified or grid-sampled points across video frames.
-For surgical instrument tracking, we initialize query points at the instrument
-tips detected in the first frame and track them forward.
+Tracks user-specified query points (from tip_init.json) across video frames.
+Each query point is (frame_idx, x, y). The model returns per-frame 2D
+positions and visibility scores.
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ logger = logging.getLogger("grader.backends.cotracker")
 
 
 class CoTrackerBackend(ModelBackend):
-    """Point tracking via Meta's Co-Tracker."""
+    """Point tracking via Meta's Co-Tracker v2."""
 
     def __init__(self) -> None:
         self._model: Any = None
@@ -27,26 +27,47 @@ class CoTrackerBackend(ModelBackend):
         try:
             import torch
 
-            logger.info("Loading Co-Tracker model from %s", path)
-            self._model = torch.load(path, map_location="cpu")
+            logger.info("Loading Co-Tracker v2 model from %s", path)
+            checkpoint = torch.load(path, map_location="cpu", weights_only=False)
+
+            # CoTracker v2 checkpoint may contain the model directly or
+            # a state_dict wrapper. Handle both cases.
+            if hasattr(checkpoint, "eval"):
+                self._model = checkpoint
+            else:
+                # Try loading via cotracker API
+                from cotracker.predictor import CoTrackerPredictor
+                self._model = CoTrackerPredictor(checkpoint=path)
+
             if hasattr(self._model, "eval"):
                 self._model.eval()
-            # Move to GPU if available
-            if torch.cuda.is_available():
+            if torch.cuda.is_available() and hasattr(self._model, "cuda"):
                 self._model = self._model.cuda()
-            logger.info("Co-Tracker model loaded")
+            logger.info("Co-Tracker v2 model loaded")
         except Exception as exc:
-            logger.error("Failed to load Co-Tracker: %s", exc)
+            logger.error("Failed to load Co-Tracker v2: %s", exc)
             raise
 
-    def detect(self, frames: list[np.ndarray]) -> list[list[Detection]]:
-        """Track instrument tips across frames.
+    def detect(
+        self,
+        frames: list[np.ndarray],
+        query_points: np.ndarray | None = None,
+    ) -> list[list[Detection]]:
+        """Track instrument tips across frames using query points.
 
-        Co-Tracker works on video sequences rather than individual frames.
-        We initialize grid points and filter to the ones that track
-        instrument-like motion patterns.
+        Parameters
+        ----------
+        frames : list[np.ndarray]
+            BGR video frames.
+        query_points : np.ndarray, optional
+            (N, 3) array of [frame_idx, x, y]. Each row defines a point
+            to track from the given frame. Labels alternate: even indices
+            are ``left_tip``, odd indices are ``right_tip``.
 
-        Falls back to placeholder detections if the model cannot run.
+        Returns
+        -------
+        list[list[Detection]]
+            Per-frame detections with visibility confidence.
         """
         if not frames or self._model is None:
             return [[] for _ in frames]
@@ -60,45 +81,60 @@ class CoTrackerBackend(ModelBackend):
             if torch.cuda.is_available():
                 video = video.cuda()
 
-            with torch.no_grad():
-                pred = self._model(video)
+            # Build queries tensor
+            queries = None
+            if query_points is not None and len(query_points) > 0:
+                # query_points: (N, 3) with [frame_idx, x, y]
+                queries = torch.from_numpy(query_points).float().unsqueeze(0)  # (1, N, 3)
+                if torch.cuda.is_available():
+                    queries = queries.cuda()
 
-            # pred.tracks: (1, T, N, 2) — N tracked points across T frames
+            with torch.no_grad():
+                if queries is not None:
+                    pred = self._model(video, queries=queries)
+                else:
+                    pred = self._model(video)
+
+            # pred.tracks: (1, T, N, 2) -- N tracked points across T frames
             tracks = pred.tracks[0].cpu().numpy()  # (T, N, 2)
             visibility = pred.visibility[0].cpu().numpy()  # (T, N)
+            n_points = tracks.shape[1]
+
+            # Determine labels for each tracked point
+            labels: list[str] = []
+            if query_points is not None and len(query_points) > 0:
+                for i in range(n_points):
+                    labels.append("left_tip" if i % 2 == 0 else "right_tip")
+            else:
+                labels = [f"point_{i}" for i in range(n_points)]
 
             all_detections: list[list[Detection]] = []
             for t in range(tracks.shape[0]):
-                visible_mask = visibility[t] > 0.5
-                visible_tracks = tracks[t][visible_mask]  # (K, 2)
-
                 detections: list[Detection] = []
-                if len(visible_tracks) >= 2:
-                    # Sort by x-coordinate, take leftmost and rightmost
-                    sorted_idx = np.argsort(visible_tracks[:, 0])
-                    left = visible_tracks[sorted_idx[0]]
-                    right = visible_tracks[sorted_idx[-1]]
-                    detections = [
-                        Detection(x=float(left[0]), y=float(left[1]),
-                                  confidence=0.9, label="left_tip"),
-                        Detection(x=float(right[0]), y=float(right[1]),
-                                  confidence=0.9, label="right_tip"),
-                    ]
-                elif len(visible_tracks) == 1:
-                    pt = visible_tracks[0]
-                    detections = [
-                        Detection(x=float(pt[0]), y=float(pt[1]),
-                                  confidence=0.8, label="left_tip"),
-                    ]
+                for p in range(n_points):
+                    vis = float(visibility[t, p])
+                    if vis > 0.5:
+                        detections.append(
+                            Detection(
+                                x=float(tracks[t, p, 0]),
+                                y=float(tracks[t, p, 1]),
+                                confidence=vis,
+                                label=labels[p],
+                            )
+                        )
                 all_detections.append(detections)
 
-            logger.info("Co-Tracker detections for %d frames", len(frames))
+            logger.info(
+                "Co-Tracker v2: tracked %d points across %d frames",
+                n_points,
+                len(frames),
+            )
             return all_detections
 
         except Exception as exc:
-            logger.warning("Co-Tracker inference failed, returning empty: %s", exc)
+            logger.warning("Co-Tracker v2 inference failed, returning empty: %s", exc)
             return [[] for _ in frames]
 
     def unload(self) -> None:
         self._model = None
-        logger.info("Co-Tracker model unloaded")
+        logger.info("Co-Tracker v2 model unloaded")

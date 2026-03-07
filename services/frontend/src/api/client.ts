@@ -97,6 +97,7 @@ export type SessionStatus =
   | "completed"
   | "exporting"
   | "export_failed"
+  | "awaiting_init"
   | "grading"
   | "graded"
   | "failed";
@@ -418,6 +419,80 @@ export async function deleteDefaultCalibration(
   return request<void>(`/api/calibration/defaults/${camera}`, {
     method: "DELETE",
   });
+}
+
+// ---- Stereo Calibration ----
+
+export interface StereoCaptureResult {
+  on_axis: CalibrationCaptureResult;
+  off_axis: CalibrationCaptureResult;
+}
+
+export interface StereoCalibrationResult {
+  on_axis: CalibrationData;
+  off_axis: CalibrationData;
+  stereo: {
+    T_on_to_off: number[][];
+    on_axis_reprojection_error: number;
+    off_axis_reprojection_error: number;
+  };
+}
+
+export async function captureStereoCalibrationFrame(): Promise<StereoCaptureResult> {
+  return request<StereoCaptureResult>("/api/calibration/capture/stereo", {
+    method: "POST",
+  });
+}
+
+export async function computeStereoCalibration(
+  saveAsDefault: boolean = true
+): Promise<StereoCalibrationResult> {
+  return request<StereoCalibrationResult>(
+    `/api/calibration/compute/stereo?save_as_default=${saveAsDefault}`,
+    { method: "POST" }
+  );
+}
+
+export async function resetStereoCalibration(): Promise<{ status: string }> {
+  return request<{ status: string }>("/api/calibration/reset/stereo", {
+    method: "POST",
+  });
+}
+
+// ---- Tip Initialization ----
+
+export interface TipDetection {
+  label: string;
+  x: number;
+  y: number;
+  confidence: number;
+  color: string;
+}
+
+export interface TipInitData {
+  detections: Record<string, TipDetection[]>;
+  sample_frames: string[];
+}
+
+export async function getTipInit(id: string): Promise<TipInitData> {
+  return request<TipInitData>(`/api/sessions/${id}/tip-init`);
+}
+
+export async function updateTipInit(
+  id: string,
+  tips: Record<string, TipDetection[]>
+): Promise<{ status: string }> {
+  return request<{ status: string }>(`/api/sessions/${id}/tip-init`, {
+    method: "PUT",
+    body: JSON.stringify({ tips }),
+  });
+}
+
+export function getSampleFrameUrl(id: string, filename: string): string {
+  const token = getToken();
+  return `${BASE_URL}/api/sessions/${id}/sample-frame/${filename}${
+    token ? `?token=${token}` : ""
+  }`;
 }
 
 // ---- System Health ----

@@ -9,6 +9,7 @@ import Dashboard from "./pages/Dashboard";
 import LiveView from "./pages/LiveView";
 import SessionList from "./pages/SessionList";
 import SessionDetail from "./pages/SessionDetail";
+import TipInitPage from "./pages/TipInitPage";
 import ModelsPage from "./pages/ModelsPage";
 import HealthPage from "./pages/HealthPage";
 import ConfigPage from "./pages/ConfigPage";
@@ -44,6 +45,7 @@ export default function App() {
               <Route path="/live" element={<LiveView />} />
               <Route path="/sessions" element={<SessionList />} />
               <Route path="/sessions/:id" element={<SessionDetail />} />
+              <Route path="/sessions/:id/init" element={<TipInitPage />} />
               <Route path="/models" element={<ModelsPage />} />
               <Route path="/config" element={<ConfigPage />} />
               <Route path="/health" element={<HealthPage />} />

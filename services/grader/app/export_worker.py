@@ -39,6 +39,10 @@ def main() -> None:
 
         try:
             from app.exporter import export_svo2
+            from app.color_detector import detect_tips
+
+            all_sample_paths: list[str] = []
+            session_dir: str | None = None
 
             for key in ("on_axis_path", "off_axis_path"):
                 svo_path = job.get(key)
@@ -50,9 +54,29 @@ def main() -> None:
                         result["frame_count"],
                         result["mp4_path"],
                     )
+                    all_sample_paths.extend(result.get("sample_paths", []))
+                    if session_dir is None:
+                        session_dir = str(Path(svo_path).parent)
 
-            update_session_status(session_id, "completed")
-            logger.info("Session %s: export complete, status -> completed", session_id)
+            # Run color detection on sample frames
+            tip_detections: dict[str, list[dict]] = {}
+            if session_dir and all_sample_paths:
+                import cv2
+                for sample_path in all_sample_paths:
+                    if Path(sample_path).exists():
+                        bgr = cv2.imread(sample_path)
+                        if bgr is not None:
+                            tips = detect_tips(bgr)
+                            filename = Path(sample_path).name
+                            tip_detections[filename] = tips
+
+                # Save tip detections
+                det_path = Path(session_dir) / "tip_detections.json"
+                det_path.write_text(json.dumps(tip_detections, indent=2))
+                logger.info("Saved tip detections to %s", det_path)
+
+            update_session_status(session_id, "awaiting_init")
+            logger.info("Session %s: export complete, status -> awaiting_init", session_id)
 
         except Exception:
             tb = traceback.format_exc()

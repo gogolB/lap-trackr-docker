@@ -81,7 +81,7 @@ export default function SessionDetail() {
     enabled: !!id,
     refetchInterval: (query) => {
       const data = query.state.data;
-      return data?.status === "grading" || data?.status === "exporting"
+      return data?.status === "grading" || data?.status === "exporting" || data?.status === "awaiting_init"
         ? 3000
         : false;
     },
@@ -240,6 +240,34 @@ export default function SessionDetail() {
               </button>
             )}
 
+            {/* Initialize tips */}
+            {session.status === "awaiting_init" && (
+              <button
+                onClick={() => navigate(`/sessions/${id}/init`)}
+                className="btn-primary gap-2"
+              >
+                <svg
+                  className="h-4 w-4"
+                  fill="none"
+                  viewBox="0 0 24 24"
+                  strokeWidth={2}
+                  stroke="currentColor"
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    d="M15 10.5a3 3 0 11-6 0 3 3 0 016 0z"
+                  />
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    d="M19.5 10.5c0 7.142-7.5 11.25-7.5 11.25S4.5 17.642 4.5 10.5a7.5 7.5 0 1115 0z"
+                  />
+                </svg>
+                Initialize Tips
+              </button>
+            )}
+
             {/* Submit for grading */}
             {session.status === "completed" && (
               <button
@@ -364,6 +392,46 @@ export default function SessionDetail() {
                 available on the device.
               </p>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Awaiting tip initialization */}
+      {session.status === "awaiting_init" && (
+        <div className="card">
+          <div className="flex flex-col items-center gap-4 py-8">
+            <svg
+              className="h-10 w-10 text-amber-400"
+              fill="none"
+              viewBox="0 0 24 24"
+              strokeWidth={1.5}
+              stroke="currentColor"
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                d="M15 10.5a3 3 0 11-6 0 3 3 0 016 0z"
+              />
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                d="M19.5 10.5c0 7.142-7.5 11.25-7.5 11.25S4.5 17.642 4.5 10.5a7.5 7.5 0 1115 0z"
+              />
+            </svg>
+            <div className="text-center">
+              <p className="text-lg font-semibold text-white">
+                Tip Initialization Required
+              </p>
+              <p className="mt-1 text-sm text-slate-400">
+                Instrument tips have been auto-detected. Review and confirm their positions before grading.
+              </p>
+            </div>
+            <button
+              onClick={() => navigate(`/sessions/${id}/init`)}
+              className="btn-primary gap-2"
+            >
+              Initialize Tips
+            </button>
           </div>
         </div>
       )}

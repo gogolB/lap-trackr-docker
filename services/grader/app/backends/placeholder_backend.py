@@ -17,7 +17,7 @@ class PlaceholderBackend(ModelBackend):
     def load(self, path: str) -> None:
         logger.info("Placeholder backend loaded (no model file needed)")
 
-    def detect(self, frames: list[np.ndarray]) -> list[list[Detection]]:
+    def detect(self, frames: list[np.ndarray], query_points: np.ndarray | None = None) -> list[list[Detection]]:
         if not frames:
             return []
 

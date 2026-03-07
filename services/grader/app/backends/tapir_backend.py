@@ -34,7 +34,7 @@ class TAPIRBackend(ModelBackend):
             logger.error("Failed to load TAPIR: %s", exc)
             raise
 
-    def detect(self, frames: list[np.ndarray]) -> list[list[Detection]]:
+    def detect(self, frames: list[np.ndarray], query_points: np.ndarray | None = None) -> list[list[Detection]]:
         """Track instrument tips across frames using TAPIR.
 
         Initializes query points at the center of the first frame and tracks

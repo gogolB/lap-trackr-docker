@@ -88,6 +88,13 @@ async def start_session(
             shutil.copy2(str(default_path), str(dest))
             logger.info("Copied default calibration for %s into session dir", cam)
 
+    # Copy stereo calibration if available
+    stereo_path = Path(settings.CALIBRATION_DIR) / "default" / "stereo_calibration.json"
+    if stereo_path.exists():
+        dest = Path(session_dir) / "stereo_calibration.json"
+        shutil.copy2(str(stereo_path), str(dest))
+        logger.info("Copied stereo calibration into session dir")
+
     # Write session_metadata.json
     metadata = {
         "session_id": str(session.id),
@@ -239,13 +246,21 @@ async def grade_session(
             detail=f"Session must be completed before grading (current status: {session.status.value})",
         )
 
-    # Resolve calibration path from session directory
+    # Resolve paths from session directory
     calibration_path = None
+    stereo_calibration_path = None
+    tip_init_path = None
     if session.on_axis_path:
-        session_dir = str(Path(session.on_axis_path).parent)
-        calib_file = Path(session_dir) / "calibration_on_axis.json"
+        session_dir = Path(session.on_axis_path).parent
+        calib_file = session_dir / "calibration_on_axis.json"
         if calib_file.exists():
             calibration_path = str(calib_file)
+        stereo_file = session_dir / "stereo_calibration.json"
+        if stereo_file.exists():
+            stereo_calibration_path = str(stereo_file)
+        tip_file = session_dir / "tip_init.json"
+        if tip_file.exists():
+            tip_init_path = str(tip_file)
 
     job_payload = json.dumps(
         {
@@ -253,6 +268,8 @@ async def grade_session(
             "on_axis_path": session.on_axis_path,
             "off_axis_path": session.off_axis_path,
             "calibration_path": calibration_path,
+            "stereo_calibration_path": stereo_calibration_path,
+            "tip_init_path": tip_init_path,
         }
     )
 

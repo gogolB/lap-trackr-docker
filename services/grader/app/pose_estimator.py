@@ -194,3 +194,43 @@ def estimate_poses(
         valid,
     )
     return poses
+
+
+def estimate_poses_dual(
+    on_detections: list[list[Detection]],
+    off_detections: list[list[Detection]],
+    on_depth: list[np.ndarray],
+    off_depth: list[np.ndarray],
+    fps: float,
+    on_calibration: dict | None = None,
+    off_calibration: dict | None = None,
+    stereo_calibration: dict | None = None,
+) -> list[dict[str, Any]]:
+    """Dual-camera 3D pose estimation with fusion.
+
+    If stereo calibration is available, uses the fusion module for
+    weighted 3D combination. Otherwise falls back to single-camera
+    estimation on the on-axis camera.
+    """
+    if (
+        stereo_calibration is not None
+        and on_calibration is not None
+        and off_calibration is not None
+    ):
+        from app.fusion import fuse_dual_camera
+
+        logger.info("Using dual-camera fusion pipeline")
+        return fuse_dual_camera(
+            on_detections,
+            off_detections,
+            on_depth,
+            off_depth,
+            on_calibration,
+            off_calibration,
+            stereo_calibration,
+            fps,
+        )
+
+    # Fallback: single-camera (on-axis only)
+    logger.info("No stereo calibration, falling back to single-camera poses")
+    return estimate_poses(on_detections, on_depth, fps, calibration=on_calibration)

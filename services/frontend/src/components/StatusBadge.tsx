@@ -34,6 +34,12 @@ const statusConfig: Record<
     textClass: "text-red-400",
     dotClass: "bg-red-400",
   },
+  awaiting_init: {
+    label: "Awaiting Init",
+    bgClass: "bg-amber-400/10",
+    textClass: "text-amber-400",
+    dotClass: "bg-amber-400",
+  },
   grading: {
     label: "Grading",
     bgClass: "bg-purple-400/10",

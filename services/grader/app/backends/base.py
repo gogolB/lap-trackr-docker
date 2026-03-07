@@ -27,8 +27,19 @@ class ModelBackend(abc.ABC):
         """Load model weights from *path*."""
 
     @abc.abstractmethod
-    def detect(self, frames: list[np.ndarray]) -> list[list[Detection]]:
+    def detect(
+        self,
+        frames: list[np.ndarray],
+        query_points: np.ndarray | None = None,
+    ) -> list[list[Detection]]:
         """Run detection on a batch of BGR frames.
+
+        Parameters
+        ----------
+        frames : list[np.ndarray]
+            BGR images.
+        query_points : np.ndarray, optional
+            (N, 3) array of [frame_idx, x, y] initialization points.
 
         Returns one inner list per frame, each containing detections.
         """

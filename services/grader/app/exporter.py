@@ -126,11 +126,51 @@ def export_svo2(svo2_path: str) -> dict:
         mp4_path,
         npz_path,
     )
+
+    # Extract sample frames (first, middle, last)
+    sample_paths = _extract_sample_frames(str(mp4_path), session_dir, cam_name, frame_idx)
+
     return {
         "mp4_path": str(mp4_path),
         "npz_path": str(npz_path),
         "frame_count": frame_idx,
+        "sample_paths": sample_paths,
     }
+
+
+def _extract_sample_frames(
+    mp4_path: str, session_dir: Path, cam_name: str, total_frames: int
+) -> list[str]:
+    """Extract 3 sample frames (first, middle, last) as JPEG from an MP4."""
+    if total_frames < 1:
+        return []
+
+    cap = cv2.VideoCapture(mp4_path)
+    if not cap.isOpened():
+        logger.warning("Cannot open %s for sample frame extraction", mp4_path)
+        return []
+
+    # Frame indices: first, middle, last
+    indices = [0]
+    if total_frames > 1:
+        indices.append(total_frames // 2)
+    if total_frames > 2:
+        indices.append(total_frames - 1)
+
+    sample_paths: list[str] = []
+    for i, frame_idx in enumerate(indices):
+        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+        ret, bgr = cap.read()
+        if not ret:
+            continue
+        filename = f"{cam_name}_sample_{i}.jpg"
+        out_path = session_dir / filename
+        cv2.imwrite(str(out_path), bgr, [cv2.IMWRITE_JPEG_QUALITY, 90])
+        sample_paths.append(str(out_path))
+
+    cap.release()
+    logger.info("Extracted %d sample frames for %s", len(sample_paths), cam_name)
+    return sample_paths
 
 
 def _merge_chunks(tmp_dir: Path, npz_path: Path, num_chunks: int) -> None:

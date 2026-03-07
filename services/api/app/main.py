@@ -8,7 +8,7 @@ from sqlalchemy import select
 from app.core.database import async_session, engine
 from app.model_registry import MODEL_CATALOG
 from app.models.models import Base, MLModel, ModelStatus
-from app.routers import auth, calibration, camera_config, health, models, results, sessions
+from app.routers import auth, calibration, camera_config, health, models, results, sessions, tip_init
 
 logger = logging.getLogger("api.startup")
 
@@ -61,6 +61,7 @@ app.include_router(results.router)
 app.include_router(models.router)
 app.include_router(calibration.router)
 app.include_router(camera_config.router)
+app.include_router(tip_init.router)
 app.include_router(health.router)
 
 

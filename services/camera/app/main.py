@@ -252,6 +252,96 @@ def calibration_reset(camera_name: str):
     return {"status": "reset", "camera": camera_name}
 
 
+@app.post("/calibration/capture/stereo")
+def calibration_capture_stereo():
+    """Capture from both cameras simultaneously and detect ChArUco corners."""
+    results = {}
+    for camera_name in ("on_axis", "off_axis"):
+        if camera_name not in manager.cameras:
+            raise HTTPException(status_code=404, detail=f"Camera '{camera_name}' not found")
+
+        jpeg_bytes, bgr = manager.capture_calibration_frame(camera_name)
+        if bgr is None:
+            raise HTTPException(status_code=500, detail=f"Failed to capture frame from {camera_name}")
+
+        calibrator = _get_calibrator(camera_name)
+        result = calibrator.detect(bgr)
+
+        preview_b64 = None
+        if result.get("preview_jpeg"):
+            preview_b64 = base64.b64encode(result["preview_jpeg"]).decode("ascii")
+
+        results[camera_name] = {
+            "success": result["success"],
+            "markers_detected": result["markers_detected"],
+            "charuco_corners": result["charuco_corners"],
+            "coverage_pct": result["coverage_pct"],
+            "total_captures": result["total_captures"],
+            "preview_jpeg_b64": preview_b64,
+        }
+
+    return results
+
+
+@app.post("/calibration/compute/stereo")
+def calibration_compute_stereo():
+    """Compute per-camera extrinsics and derive inter-camera stereo transform."""
+    import numpy as np
+
+    per_camera = {}
+    for camera_name in ("on_axis", "off_axis"):
+        if camera_name not in manager.cameras:
+            raise HTTPException(status_code=404, detail=f"Camera '{camera_name}' not found")
+
+        calibrator = _get_calibrator(camera_name)
+        intrinsics = manager.get_intrinsics(camera_name)
+        result = calibrator.compute()
+
+        if not result["success"]:
+            raise HTTPException(
+                status_code=422,
+                detail=f"{camera_name}: {result.get('error', 'Calibration failed')}"
+            )
+
+        calibration = {
+            "version": 1,
+            "is_global": False,
+            "camera_name": camera_name,
+            "intrinsics": intrinsics,
+            "extrinsic_matrix": result["extrinsic_matrix"],
+            "board_config": calibrator.get_board_config(),
+            "quality": {
+                "reprojection_error": result["reprojection_error"],
+                "num_frames_used": result["num_frames_used"],
+            },
+        }
+        per_camera[camera_name] = calibration
+
+    # Derive stereo transform: T_on_to_off = T_off_to_board @ inv(T_on_to_board)
+    T_on = np.array(per_camera["on_axis"]["extrinsic_matrix"], dtype=np.float64)
+    T_off = np.array(per_camera["off_axis"]["extrinsic_matrix"], dtype=np.float64)
+    T_on_to_off = T_off @ np.linalg.inv(T_on)
+
+    return {
+        "on_axis": per_camera["on_axis"],
+        "off_axis": per_camera["off_axis"],
+        "stereo": {
+            "T_on_to_off": T_on_to_off.tolist(),
+            "on_axis_reprojection_error": per_camera["on_axis"]["quality"]["reprojection_error"],
+            "off_axis_reprojection_error": per_camera["off_axis"]["quality"]["reprojection_error"],
+        },
+    }
+
+
+@app.post("/calibration/reset/stereo")
+def calibration_reset_stereo():
+    """Reset accumulated calibration captures for both cameras."""
+    for camera_name in ("on_axis", "off_axis"):
+        if camera_name in _calibrators:
+            _calibrators[camera_name].reset()
+    return {"status": "reset", "cameras": ["on_axis", "off_axis"]}
+
+
 @app.get("/calibration/status")
 def calibration_status():
     """Return capture counts and board config for all cameras."""
