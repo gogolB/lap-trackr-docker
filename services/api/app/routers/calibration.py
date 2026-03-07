@@ -329,8 +329,9 @@ async def delete_default_calibration(
 
     # Remove the file on disk
     if cal.calibration_path:
-        p = Path(cal.calibration_path)
-        if p.exists():
+        p = Path(cal.calibration_path).resolve()
+        allowed = Path(settings.CALIBRATION_DIR).resolve()
+        if p.exists() and str(p).startswith(str(allowed)):
             p.unlink()
 
     await db.delete(cal)

@@ -7,6 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import get_current_user
+from app.core.config import settings
 from app.core.database import get_db
 from app.models.models import GradingResult, Session, User
 from app.schemas.schemas import GradingResultOut
@@ -69,14 +70,25 @@ async def get_metrics(
     results_dir = _results_dir(session)
     metrics_path = results_dir / "metrics.json"
 
+    resolved = metrics_path.resolve()
+    allowed = Path(settings.DATA_DIR).resolve() / "users" / str(current_user.id)
+    if not str(resolved).startswith(str(allowed)):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
+
     if not metrics_path.exists():
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="metrics.json not found",
         )
 
-    with open(metrics_path, "r") as f:
-        return json.load(f)
+    try:
+        with open(metrics_path, "r") as f:
+            return json.load(f)
+    except json.JSONDecodeError:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="metrics.json contains invalid JSON",
+        )
 
 
 @router.get("/{session_id}/poses")
@@ -89,11 +101,22 @@ async def get_poses(
     results_dir = _results_dir(session)
     poses_path = results_dir / "poses.json"
 
+    resolved = poses_path.resolve()
+    allowed = Path(settings.DATA_DIR).resolve() / "users" / str(current_user.id)
+    if not str(resolved).startswith(str(allowed)):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
+
     if not poses_path.exists():
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="poses.json not found",
         )
 
-    with open(poses_path, "r") as f:
-        return json.load(f)
+    try:
+        with open(poses_path, "r") as f:
+            return json.load(f)
+    except json.JSONDecodeError:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="poses.json contains invalid JSON",
+        )

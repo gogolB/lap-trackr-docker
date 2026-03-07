@@ -1,0 +1,8 @@
+.git
+__pycache__
+*.pyc
+.env
+*.svo2
+node_modules
+dist
+.venv

@@ -18,8 +18,6 @@ services:
       CALIBRATION_DIR: ${CALIBRATION_DIR:-/data/calibration}
     volumes:
       - /data:/data
-    ports:
-      - "8001:8001"
     # No privileged, runtime, or device mounts needed
 
   grader:

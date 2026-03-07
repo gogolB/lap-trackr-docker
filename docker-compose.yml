@@ -8,26 +8,26 @@ services:
       POSTGRES_DB: ${POSTGRES_DB}
     volumes:
       - /data/postgres:/var/lib/postgresql/data
-    ports:
-      - "5432:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
       interval: 5s
       timeout: 3s
       retries: 5
+    networks:
+      - internal
 
   redis:
     image: redis:7-bookworm
     restart: unless-stopped
     volumes:
       - /data/redis:/data
-    ports:
-      - "6379:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 3s
       retries: 5
+    networks:
+      - internal
 
   api:
     build:
@@ -46,8 +46,6 @@ services:
       CAMERA_SERVICE_URL: http://camera:8001
     volumes:
       - /data:/data
-    ports:
-      - "8000:8000"
     healthcheck:
       test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health')\""]
       interval: 5s
@@ -59,6 +57,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    networks:
+      - internal
 
   camera:
     build:
@@ -87,14 +87,14 @@ services:
       - /var/nvidia/nvcam/settings:/var/nvidia/nvcam/settings
       - /usr/lib/aarch64-linux-gnu/tegra:/usr/lib/aarch64-linux-gnu/tegra
       - /usr/local/zed:/usr/local/zed
-    ports:
-      - "8001:8001"
     healthcheck:
       test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8001/health')\""]
       interval: 5s
       timeout: 5s
       retries: 10
       start_period: 10s
+    networks:
+      - internal
 
   grader:
     build:
@@ -115,6 +115,8 @@ services:
         condition: service_healthy
       db:
         condition: service_healthy
+    networks:
+      - internal
 
   exporter:
     build:
@@ -135,6 +137,8 @@ services:
         condition: service_healthy
       db:
         condition: service_healthy
+    networks:
+      - internal
 
   frontend:
     build:
@@ -142,6 +146,8 @@ services:
       dockerfile: Dockerfile
     volumes:
       - frontend_dist:/app/dist
+    networks:
+      - internal
 
   nginx:
     image: nginx:1.25-bookworm
@@ -158,6 +164,12 @@ services:
         condition: service_healthy
       frontend:
         condition: service_completed_successfully
+    networks:
+      - internal
+
+networks:
+  internal:
+    driver: bridge
 
 volumes:
   frontend_dist:

@@ -80,7 +80,11 @@ def fuse_dual_camera(
     Returns list of pose dicts with frame_idx, timestamp, left_tip, right_tip.
     """
     T_on_to_off = np.array(stereo_calib["T_on_to_off"], dtype=np.float64)
-    T_off_to_on = np.linalg.inv(T_on_to_off)
+    try:
+        T_off_to_on = np.linalg.inv(T_on_to_off)
+    except np.linalg.LinAlgError:
+        logger.error("Singular extrinsic matrix T_on_to_off, cannot fuse cameras")
+        return []
 
     K_on = _build_K(on_calib)
     K_off = _build_K(off_calib)

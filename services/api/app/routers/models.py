@@ -235,6 +235,9 @@ async def upload_model(
     if not file.filename or not file.filename.endswith(".pt"):
         raise HTTPException(400, "Only .pt model files are accepted")
 
+    if len(file.filename) > 200:
+        raise HTTPException(400, "Filename too long (max 200 characters)")
+
     slug = f"custom-{file.filename.replace('.pt', '').replace(' ', '-').lower()}"
 
     # Check for duplicate slug

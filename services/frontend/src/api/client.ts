@@ -26,29 +26,36 @@ async function request<T>(
     headers["Authorization"] = `Bearer ${token}`;
   }
 
-  const response = await fetch(`${BASE_URL}${path}`, {
-    ...options,
-    headers,
-  });
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 30000);
+  try {
+    const response = await fetch(`${BASE_URL}${path}`, {
+      ...options,
+      headers,
+      signal: controller.signal,
+    });
 
-  if (response.status === 401) {
-    clearToken();
-    window.location.href = "/login";
-    throw new Error("Unauthorized");
+    if (response.status === 401) {
+      clearToken();
+      window.location.href = "/login";
+      throw new Error("Unauthorized");
+    }
+
+    if (!response.ok) {
+      const errorBody = await response.text().catch(() => "");
+      throw new Error(
+        `API Error ${response.status}: ${errorBody || response.statusText}`
+      );
+    }
+
+    if (response.status === 204) {
+      return undefined as T;
+    }
+
+    return response.json();
+  } finally {
+    clearTimeout(timeoutId);
   }
-
-  if (!response.ok) {
-    const errorBody = await response.text().catch(() => "");
-    throw new Error(
-      `API Error ${response.status}: ${errorBody || response.statusText}`
-    );
-  }
-
-  if (response.status === 204) {
-    return undefined as T;
-  }
-
-  return response.json();
 }
 
 // ---- Auth ----

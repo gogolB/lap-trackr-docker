@@ -129,6 +129,11 @@ def run_pipeline(job: dict) -> dict[str, Any]:
     on_axis_path: str = job["on_axis_path"]
     off_axis_path: str = job["off_axis_path"]
 
+    if not Path(on_axis_path).exists():
+        raise FileNotFoundError(f"On-axis SVO2 not found: {on_axis_path}")
+    if not Path(off_axis_path).exists():
+        raise FileNotFoundError(f"Off-axis SVO2 not found: {off_axis_path}")
+
     # Load calibrations
     on_calibration = _load_calibration(job, "calibration_path")
     off_calibration = _load_off_axis_calibration(job)

@@ -133,7 +133,8 @@ async def start_session(
         await db.commit()
         await db.refresh(session)
 
-    except Exception:
+    except Exception as exc:
+        logger.exception("Camera start failed")
         session.status = SessionStatus.failed
         await db.commit()
         await db.refresh(session)
@@ -206,7 +207,7 @@ async def delete_session(
     result = await db.execute(
         select(Session).where(
             Session.id == session_id, Session.user_id == current_user.id
-        )
+        ).with_for_update()
     )
     session = result.scalar_one_or_none()
     if session is None:

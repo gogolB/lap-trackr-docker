@@ -182,7 +182,7 @@ def _merge_chunks(tmp_dir: Path, npz_path: Path, num_chunks: int) -> None:
         chunk_path = tmp_dir / f"chunk_{i:04d}.npz"
         with np.load(str(chunk_path)) as data:
             for key in data:
-                all_arrays[key] = data[key]
+                all_arrays[key] = data[key].copy()
 
     np.savez_compressed(str(npz_path), **all_arrays)
 

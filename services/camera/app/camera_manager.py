@@ -37,6 +37,9 @@ class CameraManager:
         # and read by get_frame() during recording.
         self._latest_images: dict[str, sl.Mat] = {}
 
+        # Pre-allocated sl.Mat for streaming/calibration retrieval
+        self._streaming_mats: dict[str, sl.Mat] = {}
+
         # ZED SDK intrinsics extracted at open time
         self._intrinsics: dict[str, dict] = {}
 
@@ -77,6 +80,7 @@ class CameraManager:
             self.cameras[name] = cam
             self._locks[name] = threading.Lock()
             self._latest_images[name] = sl.Mat()
+            self._streaming_mats[name] = sl.Mat()
 
             # Extract factory-calibrated intrinsics from the ZED SDK
             try:
@@ -259,6 +263,10 @@ class CameraManager:
                         error_counts[name] = count
                         if count == 1 or count % 100 == 0:
                             print(f"[camera_manager] grab error on {name} (count={count})")
+                        if count >= 500:
+                            print(f"[camera_manager] CRITICAL: {name} exceeded 500 consecutive grab errors, stopping grab loop")
+                            self._grab_stop_event.set()
+                            return
             # Yield the CPU briefly so we don't spin at 100 %.
             # The ZED grab() itself blocks until the next frame is ready,
             # so this sleep is mainly a safety net.
@@ -291,7 +299,7 @@ class CameraManager:
             actual_eye = "right" if eye == "left" else "left"
 
         view = sl.VIEW.RIGHT if actual_eye == "right" else sl.VIEW.LEFT
-        image = sl.Mat()
+        image = self._streaming_mats.get(camera_name) or sl.Mat()
 
         if self.recording:
             with lock:
@@ -352,7 +360,7 @@ class CameraManager:
         if lock is None:
             return None, None
 
-        image = sl.Mat()
+        image = self._streaming_mats.get(camera_name) or sl.Mat()
 
         if self.recording:
             with lock:

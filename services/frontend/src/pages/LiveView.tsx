@@ -231,7 +231,19 @@ export default function LiveView() {
                   src={`/ws/camera/stream/${cam}?eye=${e}`}
                   alt={`${cam} ${e}`}
                   className="h-full w-full object-contain"
+                  onError={(ev) => {
+                    (ev.target as HTMLImageElement).style.display = "none";
+                    const fallback = (ev.target as HTMLImageElement).nextElementSibling as HTMLElement | null;
+                    if (fallback?.dataset.fallback) fallback.style.display = "flex";
+                  }}
                 />
+                <div
+                  data-fallback="true"
+                  className="absolute inset-0 items-center justify-center text-sm text-slate-500"
+                  style={{ display: "none" }}
+                >
+                  Stream unavailable
+                </div>
                 {/* Label overlay */}
                 <div className="absolute left-2 top-2 rounded bg-black/60 px-2 py-1 text-xs font-medium text-white backdrop-blur-sm">
                   {cam.replace("_", " ")} / {e}
