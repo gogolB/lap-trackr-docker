@@ -18,6 +18,43 @@ import {
 
 type ViewStatus = "idle" | "recording" | "stopping";
 
+/** MJPEG <img> wrapper with auto-reconnection on stream drop. */
+function MjpegStream({ src, alt }: { src: string; alt: string }) {
+  const imgRef = useRef<HTMLImageElement>(null);
+  const retryTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [retryKey, setRetryKey] = useState(0);
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      if (retryTimer.current) clearTimeout(retryTimer.current);
+    };
+  }, []);
+
+  const handleError = useCallback(() => {
+    if (retryTimer.current) clearTimeout(retryTimer.current);
+    retryTimer.current = setTimeout(() => {
+      setRetryKey((k) => k + 1);
+    }, 2000);
+  }, []);
+
+  // Append cache-buster on retries to force browser to open a new connection
+  const streamSrc = retryKey === 0
+    ? src
+    : `${src}${src.includes("?") ? "&" : "?"}_t=${retryKey}`;
+
+  return (
+    <img
+      key={retryKey}
+      ref={imgRef}
+      src={streamSrc}
+      alt={alt}
+      className="h-full w-full object-contain"
+      onError={handleError}
+    />
+  );
+}
+
 type CameraFeed = "on_axis" | "off_axis";
 type EyeFeed = "left" | "right";
 
@@ -32,6 +69,11 @@ const ALL_FEEDS: VisibleFeed[] = [
   { camera: "off_axis", eye: "left" },
   { camera: "off_axis", eye: "right" },
 ];
+
+/** Build the MJPEG stream URL on the dedicated stream port (8081). */
+function streamUrl(camera: string, eye: string): string {
+  return `http://${window.location.hostname}:8081/stream/${camera}?eye=${eye}`;
+}
 
 export default function LiveView() {
   const [status, setStatus] = useState<ViewStatus>("idle");
@@ -250,44 +292,37 @@ export default function LiveView() {
         </div>
       )}
 
-      {/* Camera grid — filtered by visibility settings */}
+      {/* Camera grid — all feeds always connected, non-visible hidden via CSS */}
       <div className={`grid gap-3 ${gridCols === 1 ? "grid-cols-1" : "grid-cols-2"}`}>
-        {visibleFeeds.map(({ camera: cam, eye: e }) => (
-          <div key={`${cam}-${e}`} className="card overflow-hidden p-0">
-            <div className="relative aspect-video w-full bg-black">
-              <img
-                src={`/ws/camera/stream/${cam}?eye=${e}`}
-                alt={`${cam} ${e}`}
-                className="h-full w-full object-contain"
-                onError={(ev) => {
-                  (ev.target as HTMLImageElement).style.display = "none";
-                  const fallback = (ev.target as HTMLImageElement).nextElementSibling as HTMLElement | null;
-                  if (fallback?.dataset.fallback) fallback.style.display = "flex";
-                }}
-              />
-              <div
-                data-fallback="true"
-                className="absolute inset-0 items-center justify-center text-sm text-slate-500"
-                style={{ display: "none" }}
-              >
-                Stream unavailable
-              </div>
-              {/* Label overlay */}
-              <div className="absolute left-2 top-2 rounded bg-black/60 px-2 py-1 text-xs font-medium text-white backdrop-blur-sm">
-                {cam.replace("_", " ")} / {e}
-              </div>
-              {/* Recording indicator on first visible feed */}
-              {status === "recording" && visibleFeeds[0]?.camera === cam && visibleFeeds[0]?.eye === e && (
-                <div className="absolute right-2 top-2 flex items-center gap-1.5 rounded bg-black/60 px-2 py-1 backdrop-blur-sm">
-                  <span className="h-2 w-2 animate-pulse rounded-full bg-red-500" />
-                  <span className="font-mono text-xs font-bold text-white">
-                    REC {formatElapsed(elapsed)}
-                  </span>
+        {ALL_FEEDS.map(({ camera: cam, eye: e }) => {
+          const isVisible = visibleCameras.has(cam) && visibleEyes.has(e);
+          return (
+            <div
+              key={`${cam}-${e}`}
+              className={`card overflow-hidden p-0 ${isVisible ? "" : "hidden"}`}
+            >
+              <div className="relative aspect-video w-full bg-black">
+                <MjpegStream
+                  src={streamUrl(cam, e)}
+                  alt={`${cam} ${e}`}
+                />
+                {/* Label overlay */}
+                <div className="absolute left-2 top-2 rounded bg-black/60 px-2 py-1 text-xs font-medium text-white backdrop-blur-sm">
+                  {cam.replace("_", " ")} / {e}
                 </div>
-              )}
+                {/* Recording indicator on first visible feed */}
+                {status === "recording" && visibleFeeds[0]?.camera === cam && visibleFeeds[0]?.eye === e && (
+                  <div className="absolute right-2 top-2 flex items-center gap-1.5 rounded bg-black/60 px-2 py-1 backdrop-blur-sm">
+                    <span className="h-2 w-2 animate-pulse rounded-full bg-red-500" />
+                    <span className="font-mono text-xs font-bold text-white">
+                      REC {formatElapsed(elapsed)}
+                    </span>
+                  </div>
+                )}
+              </div>
             </div>
-          </div>
-        ))}
+          );
+        })}
       </div>
 
       {/* Controls row */}
