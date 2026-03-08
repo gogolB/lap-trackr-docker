@@ -87,7 +87,7 @@ fi
 
 # Auto-detect CoTracker model (if not explicitly set)
 if ! echo "$ALL_ARGS" | grep -q -- "--cotracker-model"; then
-    CT_PATH="$DATA_DIR/models/cotracker/scaled_offline.pth"
+    CT_PATH="$DATA_DIR/models/cotracker/cotracker-v3-offline/scaled_offline.pth"
     if [[ -f "$CT_PATH" ]]; then
         EXTRA_ARGS+=(--cotracker-model "$CT_PATH")
     else
