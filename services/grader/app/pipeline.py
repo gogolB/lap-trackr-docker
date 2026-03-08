@@ -790,7 +790,7 @@ def run_pipeline(job: dict, on_progress: ProgressCallback = None) -> dict[str, A
     # Stage 1 -- load SVO2 files and extract frames + depth maps.
     _progress("load_on_axis", 0, 1, "Opening on-axis recording")
     logger.info("Stage 1: Loading SVO2 from %s", on_axis_path)
-    frames, depth_maps, fps = load_svo2(
+    frames, depth_maps, fps, _ = load_svo2(
         on_axis_path,
         on_progress=lambda current, total: _progress(
             "load_on_axis",
@@ -810,7 +810,7 @@ def run_pipeline(job: dict, on_progress: ProgressCallback = None) -> dict[str, A
 
     _progress("load_off_axis", 0, 1, "Opening off-axis recording")
     logger.info("Stage 1b: Loading off-axis SVO2 from %s", off_axis_path)
-    off_frames, off_depth, off_fps = load_svo2(
+    off_frames, off_depth, off_fps, _ = load_svo2(
         off_axis_path,
         on_progress=lambda current, total: _progress(
             "load_off_axis",
@@ -1208,24 +1208,46 @@ def run_v2_pipeline(job: dict, on_progress: ProgressCallback = None) -> dict[str
     on_calibration = adjust_calibration(on_calibration, camera_config, "on_axis")
     off_calibration = adjust_calibration(off_calibration, camera_config, "off_axis")
 
+    # Determine labeled frame indices so they are always included in sampling
+    session_dir = Path(on_axis_path).parent
+    from app.passes.tip_loader import _load_frame_manifest
+    _tip_manifest = _load_frame_manifest(session_dir)
+    _on_extra: set[int] = set()
+    _off_extra: set[int] = set()
+    for filename, entry in _tip_manifest.items():
+        cam = entry.get("camera", "")
+        fidx = entry.get("frame_idx")
+        if fidx is None:
+            continue
+        if "on_axis" in filename or cam == "on_axis":
+            _on_extra.add(int(fidx))
+        if "off_axis" in filename or cam == "off_axis":
+            _off_extra.add(int(fidx))
+    if _on_extra or _off_extra:
+        logger.info(
+            "Injecting labeled frames: on_axis=%s off_axis=%s",
+            sorted(_on_extra), sorted(_off_extra),
+        )
+
     # Load frames
     _progress("load_frames", 0, 2, "Loading on-axis frames")
     logger.info("V2 Pipeline: Loading frames")
-    frames, depth_maps, fps = load_svo2(
+    frames, depth_maps, fps, on_frame_indices = load_svo2(
         on_axis_path,
         on_progress=lambda c, t: _progress("load_frames", c, t, "Loading on-axis"),
         camera_config=camera_config,
+        extra_frames=_on_extra or None,
     )
     _progress("load_frames", 1, 2, "Loading off-axis frames")
-    off_frames, off_depth, off_fps = load_svo2(
+    off_frames, off_depth, off_fps, off_frame_indices = load_svo2(
         off_axis_path,
         on_progress=lambda c, t: _progress("load_frames", c, t, "Loading off-axis"),
         camera_config=camera_config,
+        extra_frames=_off_extra or None,
     )
     logger.info("Loaded %d on-axis, %d off-axis frames at %.1f fps", len(frames), len(off_frames), fps)
 
     # Create PassData
-    session_dir = Path(on_axis_path).parent
     data = PassData(
         session_dir=session_dir,
         on_frames=frames,
@@ -1236,6 +1258,8 @@ def run_v2_pipeline(job: dict, on_progress: ProgressCallback = None) -> dict[str
         stereo_calib=stereo_calibration,
         on_calib=on_calibration,
         off_calib=off_calibration,
+        on_frame_indices=on_frame_indices,
+        off_frame_indices=off_frame_indices,
     )
 
     # Pass 1: Segmentation (SAM2 or SAM3)

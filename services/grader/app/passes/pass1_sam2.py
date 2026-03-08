@@ -189,9 +189,11 @@ def run(
     # Load tip points separately for each camera view with resolved frame indices
     on_tip_points, on_fallback = load_tip_points(
         data.session_dir, "on_axis", sample_interval, n_frames=len(data.on_frames),
+        frame_indices=data.on_frame_indices or None,
     )
     off_tip_points, off_fallback = load_tip_points(
         data.session_dir, "off_axis", sample_interval, n_frames=len(data.off_frames),
+        frame_indices=data.off_frame_indices or None,
     )
     used_fallback = on_fallback or off_fallback
 

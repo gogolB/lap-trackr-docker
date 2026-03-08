@@ -24,8 +24,9 @@ def load_svo2(
     sample_interval: int | None = None,
     on_progress: Callable[[int, int], None] | None = None,
     camera_config: dict | None = None,
-) -> Tuple[List[np.ndarray], List[np.ndarray], float]:
-    """Open an SVO2 file and return sampled frames, depth maps, and FPS.
+    extra_frames: set[int] | None = None,
+) -> Tuple[List[np.ndarray], List[np.ndarray], float, List[int]]:
+    """Open an SVO2 file and return sampled frames, depth maps, FPS, and indices.
 
     Parameters
     ----------
@@ -34,6 +35,9 @@ def load_svo2(
     sample_interval : int, optional
         Keep every *n*-th frame.  Defaults to ``FRAME_SAMPLE_INTERVAL`` from
         config.
+    extra_frames : set[int], optional
+        Additional original frame indices to include even if they don't fall
+        on the regular sample interval (e.g. tip-init labeled frames).
 
     Returns
     -------
@@ -43,12 +47,16 @@ def load_svo2(
         Depth images as ``(H, W)`` float32 arrays (metres).
     fps : float
         Frames-per-second of the original recording.
+    original_indices : list[int]
+        The original video frame index for each returned frame, in order.
     """
 
     if sample_interval is None:
         sample_interval = FRAME_SAMPLE_INTERVAL
     cam_name = Path(svo_path).stem
     transform = get_camera_transform(camera_config, cam_name)
+
+    _extra = extra_frames or set()
 
     # Prefer exported files when available so grading uses the same transformed
     # frames/depth that the user sees in tip init and playback artifacts.
@@ -57,6 +65,7 @@ def load_svo2(
         sample_interval,
         on_progress=on_progress,
         camera_config=camera_config,
+        extra_frames=_extra,
     )
     if export_result is not None:
         return export_result
@@ -72,7 +81,9 @@ def load_svo2(
             "No ZED SDK and no exported files -- returning synthetic data "
             "for development/testing."
         )
-        return _generate_synthetic_data(sample_interval)
+        synth_frames, synth_depths, synth_fps = _generate_synthetic_data(sample_interval)
+        synth_indices = list(range(0, len(synth_frames) * sample_interval, sample_interval))
+        return synth_frames, synth_depths, synth_fps, synth_indices
 
     # --- ZED SDK path -------------------------------------------------------
     init_params = sl.InitParameters()
@@ -101,6 +112,7 @@ def load_svo2(
 
     frames: list[np.ndarray] = []
     depth_maps: list[np.ndarray] = []
+    original_indices: list[int] = []
     frame_idx = 0
     view = sl.VIEW.RIGHT if transform["swap_eyes"] else sl.VIEW.LEFT
     use_right_depth = bool(transform["swap_eyes"]) and hasattr(sl.MEASURE, "DEPTH_RIGHT")
@@ -116,7 +128,7 @@ def load_svo2(
         if err != sl.ERROR_CODE.SUCCESS:
             break
 
-        if frame_idx % sample_interval == 0:
+        if frame_idx % sample_interval == 0 or frame_idx in _extra:
             camera.retrieve_image(image_mat, view)
             camera.retrieve_measure(depth_mat, depth_measure)
 
@@ -125,6 +137,7 @@ def load_svo2(
             depth = np.array(depth_mat.get_data(), dtype=np.float32)
             frames.append(apply_transforms(frame, transform))
             depth_maps.append(apply_transforms(depth, transform))
+            original_indices.append(frame_idx)
 
         current = frame_idx + 1
         if on_progress and (current % 10 == 0 or current == total_frames):
@@ -136,13 +149,14 @@ def load_svo2(
 
     camera.close()
     logger.info(
-        "Read %d / %d frames from %s (sample_interval=%d)",
+        "Read %d / %d frames from %s (sample_interval=%d, extra=%d)",
         len(frames),
         frame_idx,
         svo_path,
         sample_interval,
+        len(_extra),
     )
-    return frames, depth_maps, fps
+    return frames, depth_maps, fps, original_indices
 
 
 # ---------------------------------------------------------------------------
@@ -154,7 +168,8 @@ def _try_load_from_exports(
     sample_interval: int,
     on_progress: Callable[[int, int], None] | None = None,
     camera_config: dict | None = None,
-) -> Tuple[List[np.ndarray], List[np.ndarray], float] | None:
+    extra_frames: set[int] | None = None,
+) -> Tuple[List[np.ndarray], List[np.ndarray], float, List[int]] | None:
     """Try to load frames and depth from exported MP4 + NPZ files.
 
     Returns None if the export files don't exist.
@@ -211,8 +226,11 @@ def _try_load_from_exports(
         depth_data = np.load(str(npz_path))
         depth_keys = sorted(depth_data.files)
 
+        _extra = extra_frames or set()
+
         frames: list[np.ndarray] = []
         depth_maps: list[np.ndarray] = []
+        original_indices: list[int] = []
         frame_idx = 0
 
         while True:
@@ -220,7 +238,7 @@ def _try_load_from_exports(
             if not ret:
                 break
 
-            if frame_idx % sample_interval == 0:
+            if frame_idx % sample_interval == 0 or frame_idx in _extra:
                 frame = bgr.copy()
                 key = f"frame_{frame_idx:06d}"
                 if key in depth_data:
@@ -238,6 +256,7 @@ def _try_load_from_exports(
 
                 frames.append(frame)
                 depth_maps.append(depth)
+                original_indices.append(frame_idx)
 
             current = frame_idx + 1
             if on_progress and (current % 10 == 0 or current == total_frames):
@@ -247,13 +266,15 @@ def _try_load_from_exports(
         if on_progress:
             on_progress(frame_idx, max(total_frames, frame_idx, 1))
 
+        n_extra_loaded = sum(1 for i in original_indices if i in _extra and i % sample_interval != 0)
         logger.info(
-            "Loaded %d / %d frames from exports (sample_interval=%d)",
+            "Loaded %d / %d frames from exports (sample_interval=%d, +%d labeled frames)",
             len(frames),
             frame_idx,
             sample_interval,
+            n_extra_loaded,
         )
-        return frames, depth_maps, fps
+        return frames, depth_maps, fps, original_indices
     finally:
         cap.release()
         if depth_data is not None:
@@ -265,7 +286,8 @@ def load_frames_list(
     sample_interval: int | None = None,
     on_progress: Callable[[int, int], None] | None = None,
     camera_config: dict | None = None,
-) -> Tuple[List[np.ndarray], List[np.ndarray], float]:
+    extra_frames: set[int] | None = None,
+) -> Tuple[List[np.ndarray], List[np.ndarray], float, List[int]]:
     """Convenience wrapper that returns frames and depth for in-memory processing.
 
     Identical to :func:`load_svo2` but named explicitly for the v2 pipeline
@@ -276,6 +298,7 @@ def load_frames_list(
         sample_interval=sample_interval,
         on_progress=on_progress,
         camera_config=camera_config,
+        extra_frames=extra_frames,
     )
 
 

@@ -48,3 +48,7 @@ class PassData:
     # Depth maps for single-camera fallback in pass 4
     on_depth: list[np.ndarray] = field(default_factory=list)
     off_depth: list[np.ndarray] = field(default_factory=list)
+
+    # Original video frame indices for each sampled frame (for tip_init resolution)
+    on_frame_indices: list[int] = field(default_factory=list)
+    off_frame_indices: list[int] = field(default_factory=list)

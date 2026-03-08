@@ -97,7 +97,7 @@ def _segment_view_points(
     # Forward propagation
     forward_results: dict[int, dict[int, np.ndarray]] = {}
     for frame_idx, obj_ids, low_res_masks, video_res_masks, obj_scores in predictor.propagate_in_video(
-        inference_state, start_frame_idx=0, reverse=False,
+        inference_state, start_frame_idx=0, max_frame_num_to_track=n_frames, reverse=False,
     ):
         frame_masks = {}
         for i, oid in enumerate(obj_ids):
@@ -110,7 +110,7 @@ def _segment_view_points(
     # Backward propagation
     backward_results: dict[int, dict[int, np.ndarray]] = {}
     for frame_idx, obj_ids, low_res_masks, video_res_masks, obj_scores in predictor.propagate_in_video(
-        inference_state, start_frame_idx=0, reverse=True,
+        inference_state, start_frame_idx=0, max_frame_num_to_track=n_frames, reverse=True,
     ):
         frame_masks = {}
         for i, oid in enumerate(obj_ids):
@@ -246,9 +246,11 @@ def run(
     # Load tip points separately for each camera view with resolved frame indices
     on_tip_points, on_fallback = load_tip_points(
         data.session_dir, "on_axis", sample_interval, n_frames=len(data.on_frames),
+        frame_indices=data.on_frame_indices or None,
     )
     off_tip_points, off_fallback = load_tip_points(
         data.session_dir, "off_axis", sample_interval, n_frames=len(data.off_frames),
+        frame_indices=data.off_frame_indices or None,
     )
     used_fallback = on_fallback or off_fallback
 

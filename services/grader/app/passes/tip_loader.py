@@ -20,7 +20,8 @@ _LABEL_OBJ_IDS = {"green_tip": 1, "pink_tip": 2}
 
 # Expected HSV ranges for instrument tip colors
 _HSV_RANGES = {
-    "green_tip": {"h_low": 35, "h_high": 85, "s_min": 40, "v_min": 40},
+    # Green instruments read hue ~10-35 under warm surgical lighting (not pure green 60)
+    "green_tip": {"h_low": 8, "h_high": 85, "s_min": 40, "v_min": 40},
     "pink_tip": {"h_low": 140, "h_high": 180, "s_min": 25, "v_min": 70},
 }
 
@@ -150,12 +151,13 @@ def load_tip_points(
     camera_name: str,
     sample_interval: int = 1,
     n_frames: int | None = None,
+    frame_indices: list[int] | None = None,
 ) -> tuple[dict[str, tuple[float, float, int]], bool]:
     """Load tip init points for a specific camera view, resolving frame indices.
 
     Reads tip_init.json (or tip_detections.json fallback) and resolves the
     original frame index from tip_init_samples.json or *_export.json, then
-    converts to sampled frame space.
+    maps to the sampled frame position.
 
     Parameters
     ----------
@@ -167,6 +169,11 @@ def load_tip_points(
         Frame sampling interval used when loading video frames.
     n_frames : int, optional
         Number of frames available for this view (used to clamp indices).
+    frame_indices : list[int], optional
+        Actual original frame indices loaded by the sampler (from load_svo2).
+        When provided, uses exact index lookup instead of arithmetic
+        approximation, which is critical when labeled frames are injected
+        into the sample set.
 
     Returns
     -------
@@ -205,16 +212,32 @@ def load_tip_points(
             )
             continue
 
-        # Convert to sampled frame space
-        sampled_idx = max(0, int(round(original_idx / max(sample_interval, 1))))
+        # Map original frame index to sampled frame position
+        if frame_indices is not None:
+            # Exact lookup — labeled frames are injected into the sample set
+            try:
+                sampled_idx = frame_indices.index(original_idx)
+            except ValueError:
+                # Frame wasn't loaded (shouldn't happen if extra_frames was used)
+                import bisect
+                sampled_idx = bisect.bisect_left(frame_indices, original_idx)
+                sampled_idx = min(sampled_idx, len(frame_indices) - 1)
+                logger.warning(
+                    "Frame %d not in loaded set, snapped to nearest: index %d (frame %d)",
+                    original_idx, sampled_idx, frame_indices[sampled_idx],
+                )
+        else:
+            # Arithmetic fallback when frame_indices not available
+            sampled_idx = max(0, int(round(original_idx / max(sample_interval, 1))))
 
         # Clamp to available frames
         if n_frames is not None:
             sampled_idx = min(sampled_idx, n_frames - 1)
 
         logger.info(
-            "Resolved %s: original_frame=%d -> sampled_frame=%d (interval=%d)",
+            "Resolved %s: original_frame=%d -> sampled_frame=%d (interval=%d, exact=%s)",
             filename, original_idx, sampled_idx, sample_interval,
+            frame_indices is not None,
         )
 
         for det in detections:
