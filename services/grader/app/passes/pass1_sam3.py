@@ -1,7 +1,10 @@
 """Pass 1 (SAM3) — SAM3 video segmentation for per-instrument binary masks.
 
-Uses Meta's Segment Anything Model 3 with the request-response video API.
-Supports both point prompts (from tip_init.json) and text prompts.
+Uses Meta's Segment Anything Model 3 via its SAM2-compatible tracker API
+(init_state / add_new_points / propagate_in_video).
+
+Also supports text-based prompting via the handle_request API when no
+tip_init.json is available.
 """
 
 from __future__ import annotations
@@ -87,16 +90,16 @@ def _frames_to_jpeg_dir(frames: list[np.ndarray]) -> str:
     return tmp_dir
 
 
-def _segment_view(
+def _segment_view_points(
     predictor,
+    inference_state,
     frames: list[np.ndarray],
     tip_points: dict[str, tuple[float, float, int]],
-    use_text_prompts: bool = False,
     base_offset: int = 0,
     total_steps: int = 0,
     on_progress: Callable[[int, int], None] | None = None,
 ) -> dict[str, list[np.ndarray | None]]:
-    """Run SAM3 segmentation on a single camera view.
+    """Run SAM3 point-based segmentation using the SAM2-compatible API.
 
     Returns {label: [rle_mask_or_None per frame]}.
     """
@@ -108,111 +111,56 @@ def _segment_view(
     h, w = frames[0].shape[:2]
     n_frames = len(frames)
 
-    frame_dir = _frames_to_jpeg_dir(frames)
-    try:
-        return _segment_view_inner(
-            predictor, frame_dir, n_frames, h, w,
-            tip_points, use_text_prompts=use_text_prompts,
-            base_offset=base_offset, total_steps=total_steps,
-            on_progress=on_progress,
-        )
-    finally:
-        shutil.rmtree(frame_dir, ignore_errors=True)
-
-
-def _segment_view_inner(
-    predictor,
-    frame_dir: str,
-    n_frames: int,
-    h: int,
-    w: int,
-    tip_points: dict[str, tuple[float, float, int]],
-    use_text_prompts: bool = False,
-    base_offset: int = 0,
-    total_steps: int = 0,
-    on_progress: Callable[[int, int], None] | None = None,
-) -> dict[str, list[np.ndarray | None]]:
-    """Inner segmentation loop using SAM3 request-response API."""
-    import torch
-
     if on_progress:
         on_progress(base_offset, total_steps)
 
-    # Start a video session
-    response = predictor.handle_request({
-        "type": "start_session",
-        "resource_path": frame_dir,
-    })
-    session_id = response["session_id"]
+    # Add point prompts for each instrument (relative coords)
+    for label, (x, y, frame_idx) in tip_points.items():
+        obj_id = _LABEL_OBJ_IDS.get(label)
+        if obj_id is None:
+            continue
 
-    try:
-        # Add prompts for each instrument
-        for label, (x, y, frame_idx) in tip_points.items():
-            if use_text_prompts:
-                text = _TEXT_PROMPTS.get(label, label)
-                predictor.handle_request({
-                    "type": "add_prompt",
-                    "session_id": session_id,
-                    "frame_index": frame_idx,
-                    "text": text,
-                })
-                logger.info("Added text prompt for %s: '%s' at frame %d", label, text, frame_idx)
-            else:
-                # Normalize coordinates to [0, 1] for SAM3
-                norm_x = x / w
-                norm_y = y / h
-                predictor.handle_request({
-                    "type": "add_prompt",
-                    "session_id": session_id,
-                    "frame_index": frame_idx,
-                    "points": [[norm_x, norm_y]],
-                    "labels": [1],
-                })
-                logger.info("Added point prompt for %s: (%.1f, %.1f) -> norm (%.4f, %.4f) at frame %d",
-                            label, x, y, norm_x, norm_y, frame_idx)
+        rel_points = torch.tensor([[x / w, y / h]], dtype=torch.float32)
+        labels = torch.tensor([1], dtype=torch.int32)  # 1 = positive click
 
-        # Forward propagation
-        forward_results: dict[int, dict[int, np.ndarray]] = {}
-        for frame_result in predictor.propagate_in_video(session_id):
-            frame_idx = frame_result["frame_idx"]
-            obj_ids = frame_result.get("obj_ids", [])
-            masks_tensor = frame_result.get("video_res_masks")
+        predictor.add_new_points(
+            inference_state=inference_state,
+            frame_idx=frame_idx,
+            obj_id=obj_id,
+            points=rel_points,
+            labels=labels,
+            clear_old_points=False,
+        )
+        logger.info(
+            "Added point prompt for %s: (%.1f, %.1f) -> rel (%.4f, %.4f) at frame %d",
+            label, x, y, x / w, y / h, frame_idx,
+        )
 
-            if masks_tensor is not None:
-                frame_masks = {}
-                for i, oid in enumerate(obj_ids):
-                    mask = (masks_tensor[i, 0] > 0.0).cpu().numpy().astype(np.uint8)
-                    frame_masks[oid] = mask
-                forward_results[frame_idx] = frame_masks
+    # Forward propagation
+    forward_results: dict[int, dict[int, np.ndarray]] = {}
+    for frame_idx, obj_ids, low_res_masks, video_res_masks, obj_scores in predictor.propagate_in_video(
+        inference_state, start_frame_idx=0, reverse=False,
+    ):
+        frame_masks = {}
+        for i, oid in enumerate(obj_ids):
+            mask = (video_res_masks[i, 0] > 0.0).cpu().numpy().astype(np.uint8)
+            frame_masks[oid] = mask
+        forward_results[frame_idx] = frame_masks
+        if on_progress:
+            on_progress(base_offset + frame_idx + 1, total_steps)
 
-            if on_progress:
-                on_progress(base_offset + frame_idx + 1, total_steps)
-
-        # Backward propagation
-        backward_results: dict[int, dict[int, np.ndarray]] = {}
-        for frame_result in predictor.propagate_in_video(
-            session_id, direction="backward"
-        ):
-            frame_idx = frame_result["frame_idx"]
-            obj_ids = frame_result.get("obj_ids", [])
-            masks_tensor = frame_result.get("video_res_masks")
-
-            if masks_tensor is not None:
-                frame_masks = {}
-                for i, oid in enumerate(obj_ids):
-                    mask = (masks_tensor[i, 0] > 0.0).cpu().numpy().astype(np.uint8)
-                    frame_masks[oid] = mask
-                backward_results[frame_idx] = frame_masks
-
-            if on_progress:
-                on_progress(base_offset + n_frames + frame_idx + 1, total_steps)
-
-    finally:
-        # Close session to free resources
-        try:
-            predictor.close_session(session_id)
-        except Exception:
-            pass
+    # Backward propagation
+    backward_results: dict[int, dict[int, np.ndarray]] = {}
+    for frame_idx, obj_ids, low_res_masks, video_res_masks, obj_scores in predictor.propagate_in_video(
+        inference_state, start_frame_idx=0, reverse=True,
+    ):
+        frame_masks = {}
+        for i, oid in enumerate(obj_ids):
+            mask = (video_res_masks[i, 0] > 0.0).cpu().numpy().astype(np.uint8)
+            frame_masks[oid] = mask
+        backward_results[frame_idx] = frame_masks
+        if on_progress:
+            on_progress(base_offset + n_frames + frame_idx + 1, total_steps)
 
     # Merge forward and backward results (union)
     masks_by_label: dict[str, list[np.ndarray | None]] = {
@@ -238,13 +186,98 @@ def _segment_view_inner(
     return masks_by_label
 
 
+def _segment_view_text(
+    predictor,
+    frames: list[np.ndarray],
+    base_offset: int = 0,
+    total_steps: int = 0,
+    on_progress: Callable[[int, int], None] | None = None,
+) -> dict[str, list[np.ndarray | None]]:
+    """Run SAM3 text-prompt segmentation using the handle_request API.
+
+    Used when no tip_init.json is available.
+    Returns {label: [rle_mask_or_None per frame]}.
+    """
+    if not frames:
+        return {}
+
+    n_frames = len(frames)
+    frame_dir = _frames_to_jpeg_dir(frames)
+
+    try:
+        if on_progress:
+            on_progress(base_offset, total_steps)
+
+        # Start session
+        response = predictor.handle_request({
+            "type": "start_session",
+            "resource_path": frame_dir,
+        })
+        session_id = response["session_id"]
+
+        # Add text prompts
+        for label, text in _TEXT_PROMPTS.items():
+            predictor.handle_request({
+                "type": "add_prompt",
+                "session_id": session_id,
+                "frame_index": 0,
+                "text": text,
+            })
+            logger.info("Added text prompt for %s: '%s'", label, text)
+
+        # Propagate both directions
+        masks_by_label: dict[str, list[np.ndarray | None]] = {
+            label: [None] * n_frames for label in _TEXT_PROMPTS
+        }
+
+        step = 0
+        for result in predictor.handle_stream_request({
+            "type": "propagate_in_video",
+            "session_id": session_id,
+            "propagation_direction": "both",
+            "start_frame_index": 0,
+        }):
+            frame_idx = result["frame_index"]
+            frame_outputs = result.get("outputs", {})
+
+            for obj_id, obj_data in frame_outputs.items():
+                mask = obj_data.get("mask")
+                if mask is None:
+                    continue
+                if not isinstance(mask, np.ndarray):
+                    mask = np.array(mask, dtype=np.uint8)
+
+                # Map object IDs back to labels by order of prompting
+                label_list = list(_TEXT_PROMPTS.keys())
+                label_idx = obj_id if isinstance(obj_id, int) else 0
+                if label_idx < len(label_list):
+                    label = label_list[label_idx]
+                    masks_by_label[label][frame_idx] = _encode_rle(mask)
+
+            step += 1
+            if on_progress:
+                on_progress(base_offset + step, total_steps)
+
+        predictor.handle_request({
+            "type": "close_session",
+            "session_id": session_id,
+        })
+
+        return masks_by_label
+    finally:
+        shutil.rmtree(frame_dir, ignore_errors=True)
+
+
 def run(
     data: PassData,
     on_progress: Callable[[str, int, int, str], None] | None = None,
 ) -> bool:
     """Execute Pass 1: SAM3 video segmentation.
 
-    Returns True if tip_init.json was missing and auto-detected fallback was used.
+    Uses the SAM2-compatible tracker API for point prompts, or the
+    handle_request API for text prompts when no tip_init.json exists.
+
+    Returns True if tip_init.json was missing and fallback was used.
     """
     import torch
 
@@ -255,16 +288,16 @@ def run(
 
     if use_text_prompts:
         logger.info("No tip init points found, using SAM3 text prompts")
-        tip_points = {label: (0, 0, 0) for label in _LABEL_OBJ_IDS}
         used_fallback = True
 
-    logger.info("Tip init points: %s", {k: (v[0], v[1]) for k, v in tip_points.items()})
+    if not use_text_prompts:
+        logger.info("Tip init points: %s", {k: (v[0], v[1]) for k, v in tip_points.items()})
 
     try:
         from sam3.model_builder import build_sam3_video_predictor
     except ImportError:
         logger.error("sam3 package not installed, skipping Pass 1")
-        logger.error("Install with: pip install sam3")
+        logger.error("Install with: pip install git+https://github.com/facebookresearch/sam3.git")
         return used_fallback
 
     if on_progress:
@@ -275,14 +308,13 @@ def run(
         device = "cuda" if torch.cuda.is_available() else "cpu"
     logger.info("SAM3 using device: %s", device)
 
-    # SAM3 auto-downloads checkpoint from HuggingFace if no path given
-    checkpoint_path = os.environ.get("SAM3_MODEL_PATH", None)
+    # Determine GPU list for SAM3
+    if device == "cuda":
+        gpus_to_use = [torch.cuda.current_device()]
+    else:
+        gpus_to_use = []
 
-    predictor = build_sam3_video_predictor(
-        checkpoint=checkpoint_path,
-        offload_video_to_cpu=True,
-        offload_state_to_cpu=True,
-    )
+    predictor = build_sam3_video_predictor(gpus_to_use=gpus_to_use)
 
     # Total steps = (forward + backward) for on-axis + (forward + backward) for off-axis
     on_steps = len(data.on_frames) * 2
@@ -290,31 +322,58 @@ def run(
     total_steps = on_steps + off_steps
 
     try:
-        # Segment on-axis view
-        logger.info("Segmenting on-axis view (%d frames)", len(data.on_frames))
-        data.on_masks = _segment_view(
-            predictor,
-            data.on_frames,
-            tip_points,
-            use_text_prompts=use_text_prompts,
-            base_offset=0,
-            total_steps=total_steps,
-            on_progress=lambda c, t: on_progress("pass1_sam3", c, t, "SAM3 on-axis") if on_progress else None,
-        )
-        logger.info("On-axis masks: %s", {k: sum(1 for m in v if m is not None) for k, v in data.on_masks.items()})
+        if use_text_prompts:
+            # Text prompt path (handle_request API)
+            logger.info("Segmenting on-axis view with text prompts (%d frames)", len(data.on_frames))
+            data.on_masks = _segment_view_text(
+                predictor,
+                data.on_frames,
+                base_offset=0,
+                total_steps=total_steps,
+                on_progress=lambda c, t: on_progress("pass1_sam3", c, t, "SAM3 text on-axis") if on_progress else None,
+            )
 
-        # Segment off-axis view
-        logger.info("Segmenting off-axis view (%d frames)", len(data.off_frames))
-        data.off_masks = _segment_view(
-            predictor,
-            data.off_frames,
-            tip_points,
-            use_text_prompts=use_text_prompts,
-            base_offset=on_steps,
-            total_steps=total_steps,
-            on_progress=lambda c, t: on_progress("pass1_sam3", c, t, "SAM3 off-axis") if on_progress else None,
-        )
-        logger.info("Off-axis masks: %s", {k: sum(1 for m in v if m is not None) for k, v in data.off_masks.items()})
+            logger.info("Segmenting off-axis view with text prompts (%d frames)", len(data.off_frames))
+            data.off_masks = _segment_view_text(
+                predictor,
+                data.off_frames,
+                base_offset=on_steps,
+                total_steps=total_steps,
+                on_progress=lambda c, t: on_progress("pass1_sam3", c, t, "SAM3 text off-axis") if on_progress else None,
+            )
+        else:
+            # Point prompt path (SAM2-compatible API)
+            # On-axis
+            logger.info("Segmenting on-axis view (%d frames)", len(data.on_frames))
+            on_frame_dir = _frames_to_jpeg_dir(data.on_frames)
+            try:
+                on_state = predictor.init_state(video_path=on_frame_dir)
+                data.on_masks = _segment_view_points(
+                    predictor, on_state,
+                    data.on_frames, tip_points,
+                    base_offset=0, total_steps=total_steps,
+                    on_progress=lambda c, t: on_progress("pass1_sam3", c, t, "SAM3 on-axis") if on_progress else None,
+                )
+                predictor.reset_state(on_state)
+            finally:
+                shutil.rmtree(on_frame_dir, ignore_errors=True)
+            logger.info("On-axis masks: %s", {k: sum(1 for m in v if m is not None) for k, v in data.on_masks.items()})
+
+            # Off-axis
+            logger.info("Segmenting off-axis view (%d frames)", len(data.off_frames))
+            off_frame_dir = _frames_to_jpeg_dir(data.off_frames)
+            try:
+                off_state = predictor.init_state(video_path=off_frame_dir)
+                data.off_masks = _segment_view_points(
+                    predictor, off_state,
+                    data.off_frames, tip_points,
+                    base_offset=on_steps, total_steps=total_steps,
+                    on_progress=lambda c, t: on_progress("pass1_sam3", c, t, "SAM3 off-axis") if on_progress else None,
+                )
+                predictor.reset_state(off_state)
+            finally:
+                shutil.rmtree(off_frame_dir, ignore_errors=True)
+            logger.info("Off-axis masks: %s", {k: sum(1 for m in v if m is not None) for k, v in data.off_masks.items()})
 
     finally:
         del predictor
