@@ -1161,11 +1161,21 @@ def run_v2_pipeline(job: dict, on_progress: ProgressCallback = None) -> dict[str
 
     GPU models are loaded and unloaded sequentially (SAM2 then CoTracker).
     """
+    import os
     import time
 
     from app.passes.pass_data import PassData
-    from app.passes import pass1_sam2, pass2_cotracker, pass3_color
+    from app.passes import pass2_cotracker, pass3_color
     from app.passes import pass4_triangulation, pass5_smoothing, pass6_identity
+
+    # Select segmentation backend: "sam2" (default/production) or "sam3" (offline)
+    seg_backend = os.environ.get("_SEGMENTATION_BACKEND", "sam2")
+    if seg_backend == "sam3":
+        from app.passes import pass1_sam3 as pass1_seg
+        logger.info("Using SAM3 segmentation backend")
+    else:
+        from app.passes import pass1_sam2 as pass1_seg
+        logger.info("Using SAM2 segmentation backend")
 
     def _progress(stage: str, current: int, total: int, detail: str = "") -> None:
         if on_progress:
@@ -1228,20 +1238,21 @@ def run_v2_pipeline(job: dict, on_progress: ProgressCallback = None) -> dict[str
         off_calib=off_calibration,
     )
 
-    # Pass 1: SAM2 segmentation
+    # Pass 1: Segmentation (SAM2 or SAM3)
+    pass1_key = f"pass1_{seg_backend}"
     t0 = time.monotonic()
     try:
-        used_fallback = pass1_sam2.run(data, on_progress=on_progress)
+        used_fallback = pass1_seg.run(data, on_progress=on_progress)
         if used_fallback:
             warnings.append(
-                "SAM2 used auto-detected tip positions (tip_init.json not found). "
+                f"{seg_backend.upper()} used auto-detected tip positions (tip_init.json not found). "
                 "For best results, confirm tip positions via the Initialize Tips page."
             )
     except Exception as exc:
-        logger.warning("Pass 1 (SAM2) failed: %s", exc, exc_info=True)
-        warnings.append(f"Pass 1 (SAM2) failed: {exc}")
-    timings["pass1_sam2"] = time.monotonic() - t0
-    logger.info("Pass 1 timing: %.1fs", timings["pass1_sam2"])
+        logger.warning("Pass 1 (%s) failed: %s", seg_backend.upper(), exc, exc_info=True)
+        warnings.append(f"Pass 1 ({seg_backend.upper()}) failed: {exc}")
+    timings[pass1_key] = time.monotonic() - t0
+    logger.info("Pass 1 timing: %.1fs", timings[pass1_key])
 
     # Pass 2: CoTracker point refinement
     t0 = time.monotonic()

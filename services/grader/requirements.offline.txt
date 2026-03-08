@@ -1,8 +1,9 @@
 # Requirements for running the offline grading CLI (grade_offline.py).
 # Install: pip install -r requirements.offline.txt
 #
-# SAM2 and CoTracker are installed separately from their git repos:
+# SAM2, SAM3, and CoTracker are installed separately from their git repos:
 #   pip install git+https://github.com/facebookresearch/sam2.git
+#   pip install git+https://github.com/facebookresearch/sam3.git
 #   pip install git+https://github.com/facebookresearch/co-tracker.git
 #
 # For GPU support, install PyTorch with CUDA first:
@@ -15,3 +16,4 @@ scipy>=1.11,<1.15
 opencv-python-headless>=4.10,<5.0
 sqlalchemy>=2.0,<3.0
 psycopg2-binary>=2.9,<3.0
+rich>=13.0

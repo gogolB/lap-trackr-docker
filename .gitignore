@@ -15,8 +15,10 @@ venv/
 node_modules/
 frontend/dist/
 
-# Data
-/data/
+# Data (keep directory structure via .gitkeep, ignore contents)
+/data/**
+!/data/**/
+!/data/**/.gitkeep
 
 # IDE
 .vscode/

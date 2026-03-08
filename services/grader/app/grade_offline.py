@@ -5,7 +5,8 @@ Designed for processing on a workstation with a proper GPU.
 
 Usage:
     python -m app.grade_offline /path/to/session_dir [--sample-interval N] [--device DEVICE] \
-        [--sam2-model PATH] [--sam2-config NAME] [--cotracker-model PATH]
+        [--sam2-model PATH] [--sam2-config NAME] [--cotracker-model PATH] \
+        [--segmentation-backend sam2|sam3]
 
 The session directory should contain:
     - on_axis_left.mp4, off_axis_left.mp4  (exported video)
@@ -32,16 +33,39 @@ import time
 from pathlib import Path
 from typing import Any
 
+from rich.console import Console
+from rich.logging import RichHandler
+from rich.panel import Panel
+from rich.progress import (
+    BarColumn,
+    MofNCompleteColumn,
+    Progress,
+    SpinnerColumn,
+    TaskID,
+    TextColumn,
+    TimeElapsedColumn,
+    TimeRemainingColumn,
+)
+from rich.table import Table
+from rich.tree import Tree
+
+# ---------------------------------------------------------------------------
+# Rich console and logging setup
+# ---------------------------------------------------------------------------
+
+console = Console()
+
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    stream=sys.stdout,
+    format="%(message)s",
+    datefmt="[%X]",
+    handlers=[RichHandler(console=console, rich_tracebacks=True, show_path=False)],
 )
 logger = logging.getLogger("grader.offline")
 
 
 def _detect_device() -> str:
-    """Auto-detect the best available compute device."""
+    """Auto-detect the best available compute device (CUDA > MPS > CPU)."""
     try:
         import torch
 
@@ -60,19 +84,15 @@ def _detect_device() -> str:
 
 def _build_job(session_dir: Path) -> dict[str, Any]:
     """Build a pipeline job dict from files in the session directory."""
-    # Find on_axis path — prefer SVO2, fall back to sentinel
     on_axis_svo = session_dir / "on_axis.svo2"
     off_axis_svo = session_dir / "off_axis.svo2"
 
-    # The pipeline uses on_axis_path to derive the session directory.
-    # Even if the SVO2 doesn't exist, the MP4+NPZ loader uses the parent dir.
     job: dict[str, Any] = {
         "session_id": session_dir.name,
         "on_axis_path": str(on_axis_svo),
         "off_axis_path": str(off_axis_svo),
     }
 
-    # Calibration paths
     calib_on = session_dir / "calibration_on_axis.json"
     if calib_on.exists():
         job["calibration_path"] = str(calib_on)
@@ -81,7 +101,6 @@ def _build_job(session_dir: Path) -> dict[str, Any]:
     if stereo_calib.exists():
         job["stereo_calibration_path"] = str(stereo_calib)
 
-    # Camera config from session metadata
     metadata_path = session_dir / "session_metadata.json"
     if metadata_path.exists():
         try:
@@ -95,19 +114,87 @@ def _build_job(session_dir: Path) -> dict[str, Any]:
     return job
 
 
-def _print_progress(stage: str, current: int, total: int, detail: str = "") -> None:
-    """Print progress to stdout."""
-    if total > 0:
-        pct = current / total * 100
-        bar_len = 30
-        filled = int(bar_len * current / total)
-        bar = "█" * filled + "░" * (bar_len - filled)
-        print(f"\r  [{bar}] {pct:5.1f}%  {stage}: {detail}", end="", flush=True)
-        if current >= total:
-            print()  # newline when stage completes
-    else:
-        print(f"  {stage}: {detail}", flush=True)
+def _check_session_files(session_dir: Path) -> Tree:
+    """Build a rich Tree showing which session files are present."""
+    tree = Tree(f"[bold]{session_dir.name}")
 
+    expected_files = [
+        ("on_axis_left.mp4", True),
+        ("off_axis_left.mp4", True),
+        ("on_axis_depth.npz", True),
+        ("off_axis_depth.npz", True),
+        ("tip_init.json", False),
+        ("tip_detections.json", False),
+        ("calibration_on_axis.json", False),
+        ("calibration_off_axis.json", False),
+        ("stereo_calibration.json", False),
+        ("session_metadata.json", False),
+    ]
+
+    for filename, required in expected_files:
+        exists = (session_dir / filename).exists()
+        if exists:
+            size_mb = (session_dir / filename).stat().st_size / (1024 * 1024)
+            tree.add(f"[green]{filename}[/] ({size_mb:.1f} MB)")
+        elif required:
+            tree.add(f"[red]{filename}[/] (MISSING)")
+        else:
+            tree.add(f"[dim]{filename}[/] (not found)")
+
+    return tree
+
+
+# ---------------------------------------------------------------------------
+# Rich progress tracking
+# ---------------------------------------------------------------------------
+
+class RichProgressTracker:
+    """Wraps rich.Progress to work with the pipeline's callback interface."""
+
+    def __init__(self) -> None:
+        self.progress = Progress(
+            SpinnerColumn(),
+            TextColumn("[bold blue]{task.fields[stage]}"),
+            BarColumn(bar_width=40),
+            MofNCompleteColumn(),
+            TextColumn("[dim]{task.fields[detail]}"),
+            TimeElapsedColumn(),
+            TimeRemainingColumn(),
+            console=console,
+            expand=False,
+        )
+        self._tasks: dict[str, TaskID] = {}
+
+    def __enter__(self) -> RichProgressTracker:
+        self.progress.__enter__()
+        return self
+
+    def __exit__(self, *args: Any) -> None:
+        self.progress.__exit__(*args)
+
+    def callback(self, stage: str, current: int, total: int, detail: str = "") -> None:
+        """Pipeline progress callback — creates or updates a rich task per stage."""
+        if stage not in self._tasks:
+            task_id = self.progress.add_task(
+                stage,
+                total=max(total, 1),
+                stage=stage,
+                detail=detail,
+            )
+            self._tasks[stage] = task_id
+        else:
+            task_id = self._tasks[stage]
+            self.progress.update(
+                task_id,
+                completed=current,
+                total=max(total, 1),
+                detail=detail,
+            )
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
 
 def main() -> None:
     parser = argparse.ArgumentParser(
@@ -129,7 +216,14 @@ def main() -> None:
         type=str,
         default=None,
         choices=["cuda", "mps", "cpu"],
-        help="Compute device (default: auto-detect).",
+        help="Compute device (default: auto-detect CUDA > MPS > CPU).",
+    )
+    parser.add_argument(
+        "--segmentation-backend",
+        type=str,
+        default="sam2",
+        choices=["sam2", "sam3"],
+        help="Segmentation model for Pass 1 (default: sam2).",
     )
     parser.add_argument(
         "--sam2-model",
@@ -144,34 +238,41 @@ def main() -> None:
         help="SAM2 Hydra config name (default: configs/sam2.1/sam2.1_hiera_l.yaml).",
     )
     parser.add_argument(
+        "--sam3-model",
+        type=str,
+        default=None,
+        help="Path to SAM3 checkpoint. If omitted, auto-downloads from HuggingFace.",
+    )
+    parser.add_argument(
         "--cotracker-model",
         type=str,
         default=None,
-        help="Path to CoTracker checkpoint (.pth). If omitted, Pass 2 is skipped in offline mode.",
+        help="Path to CoTracker checkpoint (.pth). If omitted, Pass 2 is skipped.",
     )
     args = parser.parse_args()
 
     session_dir: Path = args.session_dir.resolve()
     if not session_dir.is_dir():
-        print(f"Error: {session_dir} is not a directory", file=sys.stderr)
+        console.print(f"[red bold]Error:[/] {session_dir} is not a directory")
         sys.exit(1)
 
     # Check for required files
     has_on = (session_dir / "on_axis_left.mp4").exists() or (session_dir / "on_axis.svo2").exists()
     has_off = (session_dir / "off_axis_left.mp4").exists() or (session_dir / "off_axis.svo2").exists()
     if not has_on or not has_off:
-        print(
-            "Error: session directory must contain on-axis and off-axis video files\n"
+        console.print(
+            "[red bold]Error:[/] session directory must contain on-axis and off-axis video files\n"
             "  Expected: on_axis_left.mp4 + off_axis_left.mp4 (or .svo2 files)",
-            file=sys.stderr,
         )
         sys.exit(1)
 
     has_tips = (session_dir / "tip_init.json").exists() or (session_dir / "tip_detections.json").exists()
-    if not has_tips:
-        print(
-            "Error: session directory must contain tip_init.json or tip_detections.json",
-            file=sys.stderr,
+    seg_backend = args.segmentation_backend
+
+    if not has_tips and seg_backend != "sam3":
+        console.print(
+            "[red bold]Error:[/] session directory must contain tip_init.json or tip_detections.json\n"
+            "  (or use [cyan]--segmentation-backend sam3[/] for text-based prompting)",
         )
         sys.exit(1)
 
@@ -180,25 +281,41 @@ def main() -> None:
     os.environ.setdefault("FRAME_SAMPLE_INTERVAL", str(args.sample_interval))
     os.environ.setdefault("PIPELINE_MODE", "v2")
 
-    # Set device override for all GPU passes
     os.environ["_GRADER_DEVICE"] = device
+    os.environ["_SEGMENTATION_BACKEND"] = seg_backend
 
-    # Set model paths if provided
     if args.sam2_model:
         os.environ["SAM2_MODEL_PATH"] = str(Path(args.sam2_model).resolve())
     if args.sam2_config:
         os.environ["SAM2_CONFIG_PATH"] = args.sam2_config
+    if args.sam3_model:
+        os.environ["SAM3_MODEL_PATH"] = str(Path(args.sam3_model).resolve())
     if args.cotracker_model:
         os.environ["_COTRACKER_MODEL_PATH"] = str(Path(args.cotracker_model).resolve())
 
-    print(f"Session:  {session_dir}")
-    print(f"Device:   {device}")
-    print(f"Sampling: every {args.sample_interval} frame(s)")
+    # Display session info
+    console.print()
+    info_table = Table(show_header=False, box=None, padding=(0, 2))
+    info_table.add_column(style="bold")
+    info_table.add_column()
+    info_table.add_row("Session", str(session_dir))
+    info_table.add_row("Device", f"[cyan]{device}[/]")
+    info_table.add_row("Segmentation", f"[cyan]{seg_backend.upper()}[/]")
+    info_table.add_row("Sampling", f"every {args.sample_interval} frame(s)")
     if args.sam2_model:
-        print(f"SAM2:     {args.sam2_model}")
+        info_table.add_row("SAM2 Model", args.sam2_model)
+    if args.sam3_model:
+        info_table.add_row("SAM3 Model", args.sam3_model)
     if args.cotracker_model:
-        print(f"CoTracker: {args.cotracker_model}")
-    print()
+        info_table.add_row("CoTracker", args.cotracker_model)
+
+    console.print(Panel(info_table, title="[bold]Offline Grader", border_style="blue"))
+    console.print()
+
+    # Show session file tree
+    file_tree = _check_session_files(session_dir)
+    console.print(file_tree)
+    console.print()
 
     # Import pipeline after env is configured
     from app.pipeline import run_v2_pipeline
@@ -206,8 +323,10 @@ def main() -> None:
     job = _build_job(session_dir)
     logger.info("Job: %s", {k: v for k, v in job.items() if k != "camera_config"})
 
+    # Run pipeline with rich progress
     t0 = time.monotonic()
-    results = run_v2_pipeline(job, on_progress=_print_progress)
+    with RichProgressTracker() as tracker:
+        results = run_v2_pipeline(job, on_progress=tracker.callback)
     elapsed = time.monotonic() - t0
 
     # Write results to session_dir/results/
@@ -217,7 +336,7 @@ def main() -> None:
     metrics = results.get("metrics", {})
     poses = results.get("poses", [])
     timings = results.get("timings", {})
-    warnings = results.get("warnings", [])
+    warnings_list = results.get("warnings", [])
 
     with open(results_dir / "metrics.json", "w") as f:
         json.dump(metrics, f, indent=2)
@@ -227,41 +346,64 @@ def main() -> None:
 
     with open(results_dir / "timings.json", "w") as f:
         json.dump(
-            {"pipeline_mode": "v2", "timings": timings, "device": device},
+            {
+                "pipeline_mode": "v2",
+                "segmentation_backend": seg_backend,
+                "timings": timings,
+                "device": device,
+            },
             f,
             indent=2,
         )
 
-    # Summary
-    print()
-    print("=" * 60)
-    print("Pipeline complete")
-    print(f"  Total time: {elapsed:.1f}s")
-    print(f"  Device:     {device}")
-    if timings:
-        for stage, t in timings.items():
-            print(f"  {stage}: {t:.1f}s")
+    # Summary panel
+    console.print()
 
-    print()
-    print("Metrics:")
+    # Timings table
+    timing_table = Table(title="Pipeline Timings", show_lines=False)
+    timing_table.add_column("Stage", style="bold")
+    timing_table.add_column("Time", justify="right")
+    timing_table.add_column("", justify="left")
+
+    total_time = sum(timings.values()) if timings else elapsed
+    for stage, t in timings.items():
+        pct = (t / total_time * 100) if total_time > 0 else 0
+        bar_len = int(pct / 100 * 20)
+        bar = "[green]" + "█" * bar_len + "[/]" + "░" * (20 - bar_len)
+        timing_table.add_row(stage, f"{t:.1f}s", bar)
+    timing_table.add_row("[bold]Total", f"[bold]{elapsed:.1f}s", "")
+    console.print(timing_table)
+    console.print()
+
+    # Metrics table
+    metrics_table = Table(title="Grading Metrics", show_lines=False)
+    metrics_table.add_column("Metric", style="bold")
+    metrics_table.add_column("Value", justify="right")
+
     for key, value in metrics.items():
         if key == "per_instrument":
             continue
-        print(f"  {key}: {value}")
+        if isinstance(value, float):
+            metrics_table.add_row(key, f"{value:.4f}")
+        else:
+            metrics_table.add_row(key, str(value))
+    console.print(metrics_table)
 
-    if warnings:
-        print()
-        print("Warnings:")
-        for w in warnings:
-            print(f"  - {w}")
+    # Warnings
+    if warnings_list:
+        console.print()
+        console.print("[yellow bold]Warnings:[/]")
+        for w in warnings_list:
+            console.print(f"  [yellow]- {w}[/]")
 
-    print()
-    print(f"Results written to: {results_dir}")
-
-    # List generated files
+    # Output files
+    console.print()
+    output_tree = Tree(f"[bold green]Results written to: {results_dir}")
     for f in sorted(results_dir.iterdir()):
         size_mb = f.stat().st_size / (1024 * 1024)
-        print(f"  {f.name} ({size_mb:.1f} MB)")
+        output_tree.add(f"{f.name} [dim]({size_mb:.1f} MB)[/]")
+    console.print(output_tree)
+    console.print()
 
 
 if __name__ == "__main__":
