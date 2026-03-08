@@ -13,66 +13,61 @@ from app.passes.pass1_sam2 import _decode_rle
 
 logger = logging.getLogger("grader.passes.pass2_cotracker")
 
-_N_SEED_POINTS = 10
+_SEEDS_PER_CHUNK = 5
 _VIS_THRESHOLD = 0.5
+# Compute centroids every Nth frame — keeps precomputation fast (~1s vs ~11s
+# for 4k+ frames) while providing enough candidates for every chunk.
+_CENTROID_STRIDE = 20
 
 
-def _sample_seed_points_from_masks(
+def _precompute_centroids(
     masks: dict[str, list[np.ndarray | None]],
     frame_shape: tuple[int, int],
-    n_seeds: int = _N_SEED_POINTS,
-) -> dict[str, np.ndarray]:
-    """Sample seed points from mask centroids across keyframes.
+    stride: int = _CENTROID_STRIDE,
+) -> dict[str, dict[int, tuple[float, float]]]:
+    """Compute mask centroids at every *stride*-th valid frame per label.
 
-    Returns {label: (N, 3) array of [frame_idx, x, y]}.
+    Returns {label: {frame_idx: (cx, cy)}}.
     """
-    seeds: dict[str, np.ndarray] = {}
     h, w = frame_shape
+    result: dict[str, dict[int, tuple[float, float]]] = {}
 
     for label, mask_list in masks.items():
-        # Find frames with valid masks
-        valid_frames: list[tuple[int, float, float]] = []
+        centroids: dict[int, tuple[float, float]] = {}
         for fidx, rle in enumerate(mask_list):
             if rle is None:
                 continue
+            # Subsample: only decode every stride-th frame
+            if fidx % stride != 0:
+                continue
             mask = _decode_rle(rle, (h, w))
             ys, xs = np.where(mask > 0)
-            if len(xs) == 0:
-                continue
-            cx = float(np.mean(xs))
-            cy = float(np.mean(ys))
-            valid_frames.append((fidx, cx, cy))
+            if len(xs) > 0:
+                centroids[fidx] = (float(np.mean(xs)), float(np.mean(ys)))
+        result[label] = centroids
+        logger.info("Precomputed %d centroids for %s (stride=%d)", len(centroids), label, stride)
 
-        if not valid_frames:
-            continue
-
-        # Select evenly-spaced keyframes
-        n_select = min(n_seeds, len(valid_frames))
-        indices = np.linspace(0, len(valid_frames) - 1, n_select, dtype=int)
-        selected = [valid_frames[i] for i in indices]
-
-        seed_array = np.array(
-            [[float(fidx), x, y] for fidx, x, y in selected],
-            dtype=np.float32,
-        )
-        seeds[label] = seed_array
-        logger.info("Sampled %d seed points for %s", len(seed_array), label)
-
-    return seeds
+    return result
 
 
 def _track_view(
     model,
     frames: list[np.ndarray],
-    seeds: dict[str, np.ndarray],
+    centroids: dict[str, dict[int, tuple[float, float]]],
     chunk_size: int,
     overlap: int,
+    seeds_per_chunk: int = _SEEDS_PER_CHUNK,
     on_progress: Callable[[int, int], None] | None = None,
 ) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray]]:
-    """Track seed points through frames using CoTracker in chunks.
+    """Track points through frames using CoTracker in chunks.
+
+    For each chunk, seed points are generated from mask centroids that fall
+    within the chunk's frame range.  This ensures seeds always have the
+    correct (x, y) for their frame, avoiding the clipping artifacts that
+    occur when global seeds are mapped into distant chunks.
 
     Returns (tracks, visibility) where:
-      tracks: {label: (T, 2)} visibility-weighted median tip position
+      tracks: {label: (T, 2)} visibility-weighted position per frame
       visibility: {label: (T,)} confidence scores
     """
     import torch
@@ -81,11 +76,21 @@ def _track_view(
     tracks_out: dict[str, np.ndarray] = {}
     vis_out: dict[str, np.ndarray] = {}
 
-    for label, seed_pts in seeds.items():
-        # Process in chunks with overlap
+    ct_device = os.environ.get("_GRADER_DEVICE", "")
+    if not ct_device:
+        ct_device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    for label, label_centroids in centroids.items():
+        if not label_centroids:
+            logger.warning("No centroids for %s, skipping", label)
+            continue
+
         all_tracks = np.full((n_frames, 2), np.nan, dtype=np.float32)
         all_vis = np.zeros(n_frames, dtype=np.float32)
         weight_acc = np.zeros(n_frames, dtype=np.float32)
+
+        # Pre-sort centroid frame indices for fast nearest-frame lookup
+        sorted_centroid_frames = sorted(label_centroids.keys())
 
         chunk_start = 0
         chunk_idx = 0
@@ -93,29 +98,60 @@ def _track_view(
 
         while chunk_start < n_frames:
             chunk_end = min(chunk_start + chunk_size, n_frames)
-            chunk_frames = frames[chunk_start:chunk_end]
-            chunk_len = len(chunk_frames)
+            chunk_len = chunk_end - chunk_start
 
-            # Adjust seed frame indices for this chunk
-            chunk_seeds = seed_pts.copy()
-            chunk_seeds[:, 0] = np.clip(chunk_seeds[:, 0] - chunk_start, 0, chunk_len - 1)
+            # Find centroid frames within this chunk's range
+            chunk_centroid_frames = [
+                f for f in sorted_centroid_frames if chunk_start <= f < chunk_end
+            ]
+
+            if chunk_centroid_frames:
+                n_select = min(seeds_per_chunk, len(chunk_centroid_frames))
+                indices = np.linspace(0, len(chunk_centroid_frames) - 1, n_select, dtype=int)
+                selected = [chunk_centroid_frames[i] for i in indices]
+            else:
+                # No centroids in this chunk — use nearest available centroid
+                mid_frame = chunk_start + chunk_len // 2
+                nearest = min(sorted_centroid_frames, key=lambda f: abs(f - mid_frame))
+                # Place at the chunk boundary closest to the nearest centroid
+                if nearest < chunk_start:
+                    selected = [chunk_start]  # clamp to first frame of chunk
+                elif nearest >= chunk_end:
+                    selected = [chunk_end - 1]  # clamp to last frame of chunk
+                else:
+                    selected = [nearest]
+                logger.debug(
+                    "Chunk %d [%d-%d]: no local centroids, using nearest frame %d",
+                    chunk_idx, chunk_start, chunk_end, nearest,
+                )
+
+            # Build queries with chunk-relative frame indices
+            queries_list = []
+            for f in selected:
+                if f in label_centroids:
+                    cx, cy = label_centroids[f]
+                else:
+                    # Fallback: use centroid from nearest available frame
+                    nearest = min(sorted_centroid_frames, key=lambda nf: abs(nf - f))
+                    cx, cy = label_centroids[nearest]
+                rel_f = float(np.clip(f - chunk_start, 0, chunk_len - 1))
+                queries_list.append([rel_f, cx, cy])
+
+            chunk_seeds = np.array(queries_list, dtype=np.float32)
 
             # Build video tensor: (1, T, 3, H, W)
-            ct_device = os.environ.get("_GRADER_DEVICE", "")
-            if not ct_device:
-                ct_device = "cuda" if torch.cuda.is_available() else "cpu"
-
+            chunk_frames = frames[chunk_start:chunk_end]
             video = np.stack(chunk_frames)
             video_tensor = torch.from_numpy(video).permute(0, 3, 1, 2).unsqueeze(0).float()
             if ct_device != "cpu":
                 video_tensor = video_tensor.to(ct_device)
 
-            queries = torch.from_numpy(chunk_seeds).float().unsqueeze(0)
+            queries_tensor = torch.from_numpy(chunk_seeds).float().unsqueeze(0)
             if ct_device != "cpu":
-                queries = queries.to(ct_device)
+                queries_tensor = queries_tensor.to(ct_device)
 
             with torch.no_grad():
-                pred = model(video_tensor, queries=queries)
+                pred = model(video_tensor, queries=queries_tensor)
 
             # Extract tracks and visibility
             if isinstance(pred, tuple) and len(pred) >= 2:
@@ -130,7 +166,7 @@ def _track_view(
             pred_tracks = pred_tracks[0].cpu().numpy()  # (T_chunk, N, 2)
             pred_vis = pred_vis[0].cpu().numpy()  # (T_chunk, N)
 
-            # Compute visibility-weighted median position per frame
+            # Compute visibility-weighted position per frame
             for t in range(chunk_len):
                 global_t = chunk_start + t
                 vis_scores = pred_vis[t]  # (N,)
@@ -141,7 +177,6 @@ def _track_view(
                 pts = pred_tracks[t][valid]  # (M, 2)
                 ws = vis_scores[valid]
 
-                # Weighted median: use visibility as weights
                 total_w = np.sum(ws)
                 wx = np.sum(pts[:, 0] * ws) / total_w
                 wy = np.sum(pts[:, 1] * ws) / total_w
@@ -149,7 +184,6 @@ def _track_view(
 
                 # Blend with existing (for overlap regions)
                 if weight_acc[global_t] > 0:
-                    # Weighted blend in overlap region
                     old_w = weight_acc[global_t]
                     new_w = mean_vis
                     blend = new_w / (old_w + new_w)
@@ -230,28 +264,31 @@ def run(
         model = model.to(device)
 
     try:
-        # Sample seed points from SAM2 masks
-        if data.on_frames:
-            on_shape = data.on_frames[0].shape[:2]
-            on_seeds = _sample_seed_points_from_masks(data.on_masks, on_shape)
-        else:
-            on_seeds = {}
+        # Precompute mask centroids (subsampled for speed)
+        if on_progress:
+            on_progress("pass2_cotracker", 0, 4, "Computing mask centroids")
 
-        if data.off_frames:
-            off_shape = data.off_frames[0].shape[:2]
-            off_seeds = _sample_seed_points_from_masks(data.off_masks, off_shape)
+        if data.on_frames and data.on_masks:
+            on_shape = data.on_frames[0].shape[:2]
+            on_centroids = _precompute_centroids(data.on_masks, on_shape)
         else:
-            off_seeds = {}
+            on_centroids = {}
+
+        if data.off_frames and data.off_masks:
+            off_shape = data.off_frames[0].shape[:2]
+            off_centroids = _precompute_centroids(data.off_masks, off_shape)
+        else:
+            off_centroids = {}
 
         # Track on-axis
-        if on_seeds and data.on_frames:
+        if on_centroids and data.on_frames:
             if on_progress:
                 on_progress("pass2_cotracker", 0, 4, "Tracking on-axis")
-            logger.info("Tracking on-axis with %d labels", len(on_seeds))
+            logger.info("Tracking on-axis with %d labels", len(on_centroids))
             data.on_tracks, data.on_visibility = _track_view(
                 model,
                 data.on_frames,
-                on_seeds,
+                on_centroids,
                 COTRACKER_CHUNK_SIZE,
                 COTRACKER_OVERLAP,
                 on_progress=lambda c, t: on_progress("pass2_cotracker", c, t, "CoTracker on-axis") if on_progress else None,
@@ -261,14 +298,14 @@ def run(
                 logger.info("On-axis %s: %d/%d visible frames", label, valid, len(data.on_frames))
 
         # Track off-axis
-        if off_seeds and data.off_frames:
+        if off_centroids and data.off_frames:
             if on_progress:
                 on_progress("pass2_cotracker", 2, 4, "Tracking off-axis")
-            logger.info("Tracking off-axis with %d labels", len(off_seeds))
+            logger.info("Tracking off-axis with %d labels", len(off_centroids))
             data.off_tracks, data.off_visibility = _track_view(
                 model,
                 data.off_frames,
-                off_seeds,
+                off_centroids,
                 COTRACKER_CHUNK_SIZE,
                 COTRACKER_OVERLAP,
                 on_progress=lambda c, t: on_progress("pass2_cotracker", c, t, "CoTracker off-axis") if on_progress else None,
