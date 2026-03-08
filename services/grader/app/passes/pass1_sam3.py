@@ -341,7 +341,8 @@ def run(
                         base_offset=0, total_steps=total_steps,
                         on_progress=lambda c, t: on_progress("pass1_sam3", c, t, "SAM3 on-axis") if on_progress else None,
                     )
-                    predictor.reset_state(on_state)
+                    if hasattr(predictor, "reset_state"):
+                        predictor.reset_state(on_state)
                 finally:
                     shutil.rmtree(on_frame_dir, ignore_errors=True)
                 logger.info("On-axis masks: %s", {k: sum(1 for m in v if m is not None) for k, v in data.on_masks.items()})
@@ -360,7 +361,8 @@ def run(
                         base_offset=on_steps, total_steps=total_steps,
                         on_progress=lambda c, t: on_progress("pass1_sam3", c, t, "SAM3 off-axis") if on_progress else None,
                     )
-                    predictor.reset_state(off_state)
+                    if hasattr(predictor, "reset_state"):
+                        predictor.reset_state(off_state)
                 finally:
                     shutil.rmtree(off_frame_dir, ignore_errors=True)
                 logger.info("Off-axis masks: %s", {k: sum(1 for m in v if m is not None) for k, v in data.off_masks.items()})
