@@ -16,6 +16,8 @@ from app.backends.base import Detection
 logger = logging.getLogger("grader.tracking_renderer")
 
 _COLORS: dict[str, tuple[int, int, int]] = {
+    "green_tip": (0, 255, 0),
+    "pink_tip": (255, 100, 220),
     "left_tip": (0, 255, 0),
     "right_tip": (255, 100, 0),
 }
@@ -128,7 +130,7 @@ def write_detection_csv(
     with output.open("w", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(
-            ["frame_idx", "timestamp_s", "camera", "label", "x", "y", "confidence"]
+            ["frame_idx", "timestamp_s", "camera", "label", "x", "y", "confidence", "source"]
         )
         for frame_idx, frame_detections in enumerate(detections):
             timestamp = frame_idx / frame_fps
@@ -142,6 +144,7 @@ def write_detection_csv(
                         f"{det.x:.3f}",
                         f"{det.y:.3f}",
                         f"{det.confidence:.4f}",
+                        det.source,
                     ]
                 )
 
@@ -159,32 +162,45 @@ def write_pose_csv(
 
     with output.open("w", newline="") as f:
         writer = csv.writer(f)
+        tip_labels = sorted(
+            {
+                key
+                for pose in poses
+                for key in pose
+                if key not in {"frame_idx", "timestamp"}
+            }
+        )
         writer.writerow(
             [
                 "frame_idx",
                 "timestamp_s",
-                "left_tip_x_m",
-                "left_tip_y_m",
-                "left_tip_z_m",
-                "right_tip_x_m",
-                "right_tip_y_m",
-                "right_tip_z_m",
+                *[
+                    axis
+                    for label in tip_labels
+                    for axis in (
+                        f"{label}_x_m",
+                        f"{label}_y_m",
+                        f"{label}_z_m",
+                    )
+                ],
             ]
         )
         for pose in poses:
-            left_tip = pose.get("left_tip") or [None, None, None]
-            right_tip = pose.get("right_tip") or [None, None, None]
+            row: list[Any] = [
+                pose.get("frame_idx"),
+                pose.get("timestamp"),
+            ]
+            for label in tip_labels:
+                tip = pose.get(label) or [None, None, None]
+                row.extend(
+                    [
+                        _format_pose_value(tip[0]),
+                        _format_pose_value(tip[1]),
+                        _format_pose_value(tip[2]),
+                    ]
+                )
             writer.writerow(
-                [
-                    pose.get("frame_idx"),
-                    pose.get("timestamp"),
-                    _format_pose_value(left_tip[0]),
-                    _format_pose_value(left_tip[1]),
-                    _format_pose_value(left_tip[2]),
-                    _format_pose_value(right_tip[0]),
-                    _format_pose_value(right_tip[1]),
-                    _format_pose_value(right_tip[2]),
-                ]
+                row
             )
 
     logger.info("Wrote calculated pose CSV: %s", output)

@@ -136,9 +136,9 @@ The PlaceholderBackend is being used. This means no real ML model is active.
 
 ### GPU out of memory
 
-Only one ML model is loaded at a time, but some models (SAM2 large: 898 MB) require significant GPU memory.
+The offline grader may need multiple heavyweight passes, especially SAM2 and CoTracker3. Large segmentation models can consume significant GPU memory.
 
-**Fix:** Activate a smaller model (SAM2 small: 185 MB, YOLOv8n: 6.2 MB).
+**Fix:** Use a smaller SAM2 checkpoint, reduce concurrent grading work, or move the offline grading job to a roomier GPU environment.
 
 ### Metrics are all zero or NaN
 

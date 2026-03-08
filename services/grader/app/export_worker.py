@@ -142,9 +142,11 @@ def main() -> None:
             update_session_status(session_id, "exporting")
             camera_config = _resolve_camera_config(job)
             all_sample_paths: list[str] = []
+            all_sample_frames: list[dict[str, object]] = []
             session_dir: str | None = None
             cancel_key = f"{EXPORT_CANCEL_KEY_PREFIX}{session_id}"
             post_export_status = job.get("post_export_status", "awaiting_init")
+            reset_tip_init = bool(job.get("reset_tip_init"))
 
             cam_keys = [k for k in ("on_axis_path", "off_axis_path") if job.get(k) and Path(job[k]).exists()]
             cam_total = len(cam_keys)
@@ -231,6 +233,7 @@ def main() -> None:
                     continue
                 svo_path, result = camera_result
                 all_sample_paths.extend(result.get("sample_paths", []))
+                all_sample_frames.extend(result.get("sample_frames", []))
                 if session_dir is None:
                     session_dir = str(Path(svo_path).parent)
 
@@ -267,6 +270,19 @@ def main() -> None:
                 det_path = Path(session_dir) / "tip_detections.json"
                 det_path.write_text(json.dumps(tip_detections, indent=2))
                 logger.info("Saved tip detections to %s", det_path)
+                if all_sample_frames:
+                    sample_manifest = {
+                        str(entry["filename"]): {
+                            "camera": str(entry["camera"]),
+                            "frame_idx": int(entry["frame_idx"]),
+                            "path": str(entry["path"]),
+                        }
+                        for entry in all_sample_frames
+                        if entry.get("filename") is not None
+                    }
+                    sample_manifest_path = Path(session_dir) / "tip_init_samples.json"
+                    sample_manifest_path.write_text(json.dumps(sample_manifest, indent=2))
+                    logger.info("Saved tip-init sample manifest to %s", sample_manifest_path)
             else:
                 _publish_progress(
                     redis_client,
@@ -276,6 +292,12 @@ def main() -> None:
                     total=1,
                     detail="No sample frames found",
                 )
+
+            if reset_tip_init and session_dir:
+                tip_init_path = Path(session_dir) / "tip_init.json"
+                if tip_init_path.exists():
+                    tip_init_path.unlink()
+                    logger.info("Removed stale tip initialization at %s", tip_init_path)
 
             _publish_progress(redis_client, session_id, stage="complete", current=1, total=1)
             redis_client.delete(cancel_key)

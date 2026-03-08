@@ -102,9 +102,6 @@ services:
       dockerfile: Dockerfile
     restart: unless-stopped
     runtime: nvidia
-    devices:
-      - /dev/nvhost-msenc:/dev/nvhost-msenc
-      - /dev/nvhost-nvdec:/dev/nvhost-nvdec
     environment:
       REDIS_URL: ${REDIS_URL}
       DATABASE_URL: ${DATABASE_URL}
@@ -112,7 +109,6 @@ services:
       MODELS_DIR: ${MODELS_DIR:-/data/models}
     volumes:
       - /data:/data
-      - /usr/local/zed:/usr/local/zed
     depends_on:
       redis:
         condition: service_healthy
@@ -124,7 +120,7 @@ services:
   exporter:
     build:
       context: ./services/grader
-      dockerfile: Dockerfile
+      dockerfile: Dockerfile.exporter
     command: ["python3", "-m", "app.export_worker"]
     restart: unless-stopped
     runtime: nvidia

@@ -319,5 +319,5 @@ docker system prune -f
 - The Jetson AGX Orin 64GB can comfortably run all 8 services simultaneously
 - SVO2 export uses hardware NVENC encoding (much faster than software)
 - Depth estimation uses ZED SDK neural mode (GPU-accelerated)
-- ML backends (YOLO, CoTracker, SAM2, TAPIR) share GPU memory; only one model is loaded at a time
+- Offline grading is expected to use SAM2 and CoTracker3 as the primary stack; auxiliary models may also consume GPU memory during grading
 - Frame sampling (every 5th frame by default) reduces processing time and memory usage

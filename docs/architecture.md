@@ -2,7 +2,7 @@
 
 ## System Overview
 
-Lap-Trackr is a Docker-containerized system that runs on an NVIDIA Jetson AGX Orin. It captures stereo video from two ZED X cameras, exports recordings to portable formats, detects instrument tips using ML models, estimates 3D poses, and computes surgical skill metrics.
+Lap-Trackr is a Docker-containerized system that runs on an NVIDIA Jetson AGX Orin. It captures stereo video from two ZED X cameras, exports recordings to portable formats, runs an offline multi-pass grading pipeline, estimates 3D poses, and computes surgical skill metrics.
 
 ## Service Topology
 
@@ -45,8 +45,8 @@ Lap-Trackr is a Docker-containerized system that runs on an NVIDIA Jetson AGX Or
 | **nginx** | `nginx:1.25-bookworm` | 80, 8081 | Reverse proxy. Serves frontend static files, routes `/api/*` to API, `/ws/camera/*` and `/stream/*` to camera |
 | **api** | Custom (Python 3.10 slim) | 8000 | FastAPI REST backend. Auth, session lifecycle, model management, calibration, job dispatch |
 | **camera** | Custom (ZED SDK base on Jetson; Python slim in dev) | 8001 | MJPEG streaming, SVO2 recording, ChArUco calibration |
-| **grader** | Custom (ZED SDK + PyTorch on Jetson; Python slim in dev) | -- | Redis worker. Loads SVO2, runs ML detection, estimates 3D poses, computes metrics |
-| **exporter** | Same image as grader, different entrypoint | -- | Redis worker. Converts SVO2 to MP4 + NPZ, extracts sample frames, runs color-based tip detection |
+| **grader** | Custom (Python 3.10 + PyTorch) | -- | Redis worker. Consumes exported artifacts, runs offline grading passes, triangulates and smooths 3D trajectories, computes metrics |
+| **exporter** | Custom (ZED SDK runtime on Jetson) | -- | Redis worker. Converts SVO2 to MP4 + NPZ, extracts sample frames, writes export metadata, runs initial color-based tip detection |
 | **frontend** | Node 20 build -> Alpine copy | -- | Build-only container. Compiles React/Vite app, outputs to shared volume |
 | **db** | `postgres:15-bookworm` | 5432 | PostgreSQL. Users, sessions, grading results, calibrations, model catalog |
 | **redis** | `redis:7-bookworm` | 6379 | Job queues (`export_jobs`, `grading_jobs`), progress tracking, model download progress |
@@ -87,7 +87,7 @@ Browsers limit concurrent connections per host (typically 6). MJPEG streams hold
 2. **exporting**: Export worker converts SVO2 to MP4 + NPZ depth
 3. **awaiting_init**: Export complete; user must confirm instrument tip positions on sample frames
 4. **completed**: Ready for grading (tip positions confirmed or auto-detected)
-5. **grading**: Grading worker is processing (ML detection, pose estimation, metrics)
+5. **grading**: Grading worker is processing the offline multi-pass pipeline (segmentation, tracking, fusion, smoothing, metrics)
 6. **graded**: Metrics available
 
 If tip auto-detection is confident (tip_init.json already exists from a previous run), the session skips `awaiting_init` and goes directly to `completed`.
@@ -110,9 +110,9 @@ User clicks Stop ──▸ API POST /sessions/{id}/stop
   ──▸ API LPUSH export_jobs (Redis)
   ──▸ Export worker BRPOP export_jobs
   ──▸ SVO2 ──▸ MP4 (hardware NVENC or software) + NPZ (depth)
-  ──▸ Extract 3 sample frames (first, middle, last)
+  ──▸ Extract representative sample frames for initialization
   ──▸ Color-detect tips on samples (green/pink HSV thresholding)
-  ──▸ Save tip_detections.json
+  ──▸ Save tip_detections.json + tip_init_samples.json
   ──▸ Status ──▸ awaiting_init or completed
 ```
 
@@ -121,16 +121,20 @@ User clicks Stop ──▸ API POST /sessions/{id}/stop
 User clicks Grade ──▸ API POST /sessions/{id}/grade
   ──▸ API LPUSH grading_jobs (Redis)
   ──▸ Grading worker BRPOP grading_jobs
-  ──▸ Load SVO2 (or MP4+NPZ fallback, or synthetic)
-  ──▸ Load active ML backend (YOLO/CoTracker/SAM2/TAPIR/Placeholder)
-  ──▸ Detect instrument tips (2D) on sampled frames
+  ──▸ Load exported MP4+NPZ artifacts and initialization metadata
+  ──▸ Pass 1: SAM2 per-view segmentation
+  ──▸ Pass 2: CoTracker3 tip refinement from confirmed tip-init points
+  ──▸ Pass 3: Color-based gap fill and identity checks
+  ──▸ Pass 4: Multi-view triangulation with reprojection residuals
+  ──▸ Pass 5: Full-trajectory smoothing / optimization
+  ──▸ Pass 6: Final green/pink identity verification
   ──▸ Render tracking overlay videos
-  ──▸ Back-project 2D detections + depth ──▸ 3D poses
-  ──▸ If dual-camera: fuse with stereo calibration
   ──▸ Compute metrics (workspace volume, speed, jerk, path length, economy, duration)
   ──▸ Save results to DB + JSON files
   ──▸ Status ──▸ graded
 ```
+
+See [Offline Grading Pipeline](offline-grading-pipeline.md) for the detailed target design.
 
 ## File System Layout
 
@@ -154,12 +158,19 @@ User clicks Grade ──▸ API POST /sessions/{id}/grade
 │   ├── stereo_calibration.json         # Inter-camera transform
 │   ├── tip_detections.json             # Auto-detected tip positions from color
 │   ├── tip_init.json                   # User-confirmed tip positions
+│   ├── tip_init_samples.json           # Sample filename -> source frame metadata
 │   ├── session_metadata.json           # Session info, camera serials, SDK version
 │   └── results/
 │       ├── metrics.json                # Skill metrics
 │       ├── poses.json                  # Per-frame 3D positions
 │       ├── tracking_on_axis.csv        # 2D detections per frame
 │       ├── tracking_off_axis.csv
+│       ├── tracking_on_axis_cotracker.csv
+│       ├── tracking_off_axis_cotracker.csv
+│       ├── tracking_on_axis_yolo.csv
+│       ├── tracking_off_axis_yolo.csv
+│       ├── tracking_on_axis_color.csv
+│       ├── tracking_off_axis_color.csv
 │       ├── tracked_positions_world.csv # 3D world positions per frame
 │       ├── tracking_on_axis.mp4        # Overlay video with detection trails
 │       └── tracking_off_axis.mp4
@@ -169,9 +180,9 @@ User clicks Grade ──▸ API POST /sessions/{id}/grade
 │       ├── off_axis.json               # Global default off-axis calibration
 │       └── stereo_calibration.json     # Global default stereo transform
 ├── models/
-│   ├── point_tracking/cotracker-v2/    # Downloaded model weights
-│   ├── segmentation/sam2-hiera-large/
-│   ├── detection/yolov8n/
+│   ├── cotracker/cotracker-v3-offline/ # Offline CoTracker3 weights
+│   ├── yolov11-pose/                   # Auxiliary YOLO pose weights
+│   ├── sam2/                           # SAM2 segmentation weights
 │   └── custom/{slug}/                  # User-uploaded models
 ├── postgres/                           # PostgreSQL data directory
 └── redis/                              # Redis persistence

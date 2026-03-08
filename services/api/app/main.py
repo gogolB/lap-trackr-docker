@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import shutil
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -30,25 +31,121 @@ _INSECURE_JWT_SECRETS = {"change-me-in-production", "change-this-to-a-random-sec
 
 
 async def _seed_model_registry() -> None:
-    """Insert catalog models that don't already exist in the database."""
+    """Insert catalog models, update metadata, and prune stale built-ins."""
+    catalog_by_slug = {entry["slug"]: entry for entry in MODEL_CATALOG}
+
     async with async_session() as db:
-        for entry in MODEL_CATALOG:
-            result = await db.execute(
-                select(MLModel).where(MLModel.slug == entry["slug"])
+        active_result = await db.execute(
+            select(MLModel).where(MLModel.is_active == True)  # noqa: E712
+        )
+        active_model_types = {
+            model.model_type
+            for model in active_result.scalars().all()
+        }
+
+        result = await db.execute(select(MLModel).where(MLModel.is_custom == False))  # noqa: E712
+        existing_models = {model.slug: model for model in result.scalars()}
+
+        removed = 0
+        for slug, model in list(existing_models.items()):
+            if slug in catalog_by_slug:
+                continue
+            _delete_catalog_model_files(model.file_path)
+            await db.delete(model)
+            existing_models.pop(slug, None)
+            removed += 1
+
+        for slug, entry in catalog_by_slug.items():
+            local_file = _resolve_catalog_local_file(entry)
+            managed_file_path = str(local_file) if local_file is not None else None
+            managed_file_size = (
+                int(local_file.stat().st_size)
+                if local_file is not None
+                else entry.get("file_size_bytes")
             )
-            if result.scalar_one_or_none() is None:
-                db.add(MLModel(
-                    slug=entry["slug"],
+            managed_status = (
+                ModelStatus.ready
+                if local_file is not None
+                else ModelStatus.available
+            )
+            model = existing_models.get(slug)
+            if model is None:
+                model = MLModel(
+                    slug=slug,
                     name=entry["name"],
                     model_type=entry["model_type"],
                     description=entry.get("description"),
                     version=entry.get("version"),
                     download_url=entry.get("download_url"),
-                    file_size_bytes=entry.get("file_size_bytes"),
-                    status=ModelStatus.available,
-                ))
+                    file_size_bytes=managed_file_size,
+                    file_path=managed_file_path,
+                    status=managed_status,
+                )
+                db.add(model)
+                existing_models[slug] = model
+            else:
+                model.name = entry["name"]
+                model.model_type = entry["model_type"]
+                model.description = entry.get("description")
+                model.version = entry.get("version")
+                model.download_url = entry.get("download_url")
+
+                if local_file is not None:
+                    model.file_path = managed_file_path
+                    model.file_size_bytes = managed_file_size
+                    if model.status != ModelStatus.active:
+                        model.status = ModelStatus.ready
+                elif entry.get("local_path") and model.status != ModelStatus.active:
+                    model.file_path = None
+                    model.file_size_bytes = managed_file_size
+                    model.status = ModelStatus.available
+
+            if (
+                model.model_type not in active_model_types
+                and entry.get("auto_activate")
+                and model.status in {ModelStatus.ready, ModelStatus.custom}
+            ):
+                model.is_active = True
+                model.status = ModelStatus.active if not model.is_custom else ModelStatus.custom
+                active_model_types.add(model.model_type)
+
         await db.commit()
-    logger.info("Model registry seeded with %d catalog entries", len(MODEL_CATALOG))
+    logger.info(
+        "Model registry reconciled with %d catalog entries (removed %d stale built-ins)",
+        len(MODEL_CATALOG),
+        removed,
+    )
+
+
+def _delete_catalog_model_files(file_path: str | None) -> None:
+    if not file_path:
+        return
+
+    models_root = Path(settings.MODELS_DIR).resolve()
+    path = Path(file_path)
+    resolved = path.resolve(strict=False)
+    if models_root not in resolved.parents:
+        logger.warning("Skipping cleanup outside models dir: %s", resolved)
+        return
+
+    target = resolved.parent if resolved.suffix else resolved
+    if target.exists():
+        shutil.rmtree(target, ignore_errors=True)
+
+
+def _resolve_catalog_local_file(entry: dict) -> Path | None:
+    local_path = entry.get("local_path")
+    if not local_path:
+        return None
+
+    models_root = Path(settings.MODELS_DIR).resolve()
+    resolved = (models_root / local_path).resolve(strict=False)
+    if models_root not in resolved.parents:
+        logger.warning("Ignoring catalog local path outside models dir: %s", resolved)
+        return None
+    if not resolved.exists() or not resolved.is_file():
+        return None
+    return resolved
 
 
 async def _run_alembic(command_name: str, revision: str = "head") -> None:

@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React from "react";
 import { Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { getSessions, getSessionDuration, downloadSession } from "../api/client";
@@ -22,16 +22,11 @@ function formatDuration(seconds: number | null): string {
 }
 
 export default function SessionList() {
-  const [downloadingId, setDownloadingId] = useState<string | null>(null);
-
   const handleDownload = async (id: string) => {
-    setDownloadingId(id);
     try {
       await downloadSession(id);
     } catch (err) {
       console.error("Download failed:", err);
-    } finally {
-      setDownloadingId(null);
     }
   };
 
@@ -143,17 +138,12 @@ export default function SessionList() {
                       {(session.status === "completed" || session.status === "graded") && (
                         <button
                           onClick={() => handleDownload(session.id)}
-                          disabled={downloadingId === session.id}
-                          className="text-sm font-medium text-slate-400 transition-colors hover:text-white disabled:opacity-50"
+                          className="text-sm font-medium text-slate-400 transition-colors hover:text-white"
                           title="Download session files"
                         >
-                          {downloadingId === session.id ? (
-                            <span className="inline-block h-4 w-4 animate-spin rounded-full border-2 border-slate-600 border-t-teal-500" />
-                          ) : (
-                            <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
-                              <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12m4.5 4.5V3" />
-                            </svg>
-                          )}
+                          <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12m4.5 4.5V3" />
+                          </svg>
                         </button>
                       )}
                       <Link

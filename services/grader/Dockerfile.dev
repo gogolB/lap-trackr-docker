@@ -3,13 +3,12 @@ FROM python:3.10-slim-bookworm
 WORKDIR /opt/grader
 
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends gcc libpq-dev && \
+    apt-get install -y --no-install-recommends ffmpeg gcc git libglib2.0-0 libgomp1 libpq-dev && \
     rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt .
-# Install deps, skipping ultralytics on dev (needs torch)
-RUN pip install --no-cache-dir \
-    redis sqlalchemy psycopg2-binary scipy numpy opencv-python-headless
+COPY requirements.grader.txt .
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.grader.txt
 
 COPY app/ app/
 

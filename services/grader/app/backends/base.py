@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import abc
 from dataclasses import dataclass
-from typing import Callable, List
+from typing import Callable
 
 import numpy as np
 
@@ -17,6 +17,7 @@ class Detection:
     y: float
     confidence: float
     label: str
+    source: str = "unknown"
 
 
 class ModelBackend(abc.ABC):
@@ -31,6 +32,7 @@ class ModelBackend(abc.ABC):
         self,
         frames: list[np.ndarray],
         query_points: np.ndarray | None = None,
+        query_labels: list[str] | tuple[str, ...] | None = None,
         on_progress: Callable[[int, int], None] | None = None,
     ) -> list[list[Detection]]:
         """Run detection on a batch of BGR frames.

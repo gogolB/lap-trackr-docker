@@ -129,9 +129,10 @@ To support a camera other than ZED X:
 
 ### Technology
 
-- Production: ZED SDK runtime image (`stereolabs/zed:5.2-py-runtime-jetson-jp5.1.2`, Python 3.8), Redis (BRPOP worker), SQLAlchemy (sync/psycopg2), scipy, numpy
-- Development: lightweight Python image, no ZED SDK, no PyTorch -- falls back to synthetic data and placeholder backend
-- Production ML stack includes PyTorch and optional Ultralytics YOLO models
+- `exporter`: ZED SDK runtime image on Jetson for SVO2 decode, depth export, and sample-frame generation
+- `grader`: standalone Python 3.10 + PyTorch worker for offline grading from exported artifacts
+- Shared libraries: Redis (BRPOP worker), SQLAlchemy (sync/psycopg2), scipy, numpy, OpenCV
+- Target offline model stack: SAM2 + CoTracker3, with color analysis and optional YOLO pose support
 
 ### Key Files
 
@@ -139,7 +140,7 @@ To support a camera other than ZED X:
 |------|---------|
 | `app/worker.py` | Main grading worker loop (Redis BRPOP on `grading_jobs`) |
 | `app/export_worker.py` | Export worker loop (Redis BRPOP on `export_jobs`) |
-| `app/pipeline.py` | Orchestrates: load -> detect -> render -> pose -> metrics |
+| `app/pipeline.py` | Orchestrates the offline grading passes from exported artifacts to metrics |
 | `app/exporter.py` | SVO2 to MP4 + NPZ conversion with hardware/software encoding |
 | `app/svo_loader.py` | Loads SVO2 via ZED SDK, fallback to MP4+NPZ, fallback to synthetic |
 | `app/model_loader.py` | Factory: loads active ML backend from DB, caches instance |
@@ -154,24 +155,28 @@ To support a camera other than ZED X:
 
 ### Worker Architecture
 
-The grader runs two separate worker processes (separate containers, same image):
+The grading subsystem runs two separate worker processes:
 
 1. **Export worker** (`python3 -m app.export_worker`): Listens on `export_jobs` Redis queue
 2. **Grading worker** (`python3 -m app.worker`): Listens on `grading_jobs` Redis queue
 
 Both use `BRPOP` (blocking pop) with a 5-second timeout. Jobs are JSON strings pushed via `LPUSH` by the API.
 
-The exporter processes `on_axis` and `off_axis` in parallel within a single session job, then runs initial color-based tip detection across the extracted sample frames.
+The exporter processes `on_axis` and `off_axis` in parallel within a single session job, then runs initial color-based tip detection across the extracted sample frames and persists sample-frame metadata for later tracker initialization.
 
 ### Pipeline Stages
 
-The grading pipeline in `pipeline.py` runs these stages sequentially:
+The grading pipeline is now an offline multi-pass system. The intended stage order is:
 
-1. **load_on_axis** / **load_off_axis**: Load video frames and depth maps
-2. **detect_on_axis** / **detect_off_axis**: Run ML backend on frames
-3. **render_on_axis** / **render_off_axis**: Render tracking overlay videos
-4. **estimate_poses**: Convert 2D detections to 3D using depth + calibration
-5. **calculate_metrics**: Compute surgical skill metrics
+1. **load_on_axis** / **load_off_axis**: Load transformed exported video and depth artifacts
+2. **segment**: Run SAM2 per camera view to recover dense green/pink tool masks
+3. **track**: Run CoTracker3 from confirmed tip-init points for sub-pixel tip tracks
+4. **gap_fill**: Apply adaptive green/pink color analysis where segmentation and tracking both fail
+5. **triangulate**: Recover 3D tool-tip positions from all valid camera views
+6. **smooth**: Apply full-trajectory smoothing / optimization using the full recording context
+7. **verify_identity**: Confirm green/pink identities and reject swaps
+8. **render_on_axis** / **render_off_axis**: Render tracking overlay videos
+9. **calculate_metrics**: Compute surgical skill metrics from the cleaned 3D trajectories
 
 Each stage publishes progress to Redis (`job_progress:{session_id}` hash) for real-time tracking by the frontend.
 
@@ -182,6 +187,8 @@ Each stage publishes progress to Redis (`job_progress:{session_id}` hash) for re
 1. **ZED SDK**: Opens SVO2 directly, uses neural depth estimation (GPU), samples every Nth frame
 2. **Exported files**: Reads `{camera}_left.mp4` (OpenCV) + `{camera}_depth.npz` (numpy)
 3. **Synthetic data**: Generates random frames and depth maps (seed=42 for reproducibility)
+
+For grading, the exported MP4 + NPZ path is the preferred input because it matches the transformed artifacts the user reviewed during initialization.
 
 ### Export Process
 
@@ -197,6 +204,8 @@ Video encoding tries:
 3. **OpenCV mp4v** (software MPEG-4)
 
 After both cameras finish exporting, the worker writes `tip_detections.json` from the extracted sample frames and advances the session to `awaiting_init`, `completed`, or `graded` depending on existing session artifacts.
+
+See [Offline Grading Pipeline](offline-grading-pipeline.md) for the accuracy-first grading design and model roles.
 
 ### Database Access
 

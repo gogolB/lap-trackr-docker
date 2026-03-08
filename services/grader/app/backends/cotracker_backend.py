@@ -1,4 +1,4 @@
-"""Co-Tracker v2 point tracking backend.
+"""CoTracker point tracking backend.
 
 Tracks user-specified query points (from tip_init.json) across video frames.
 Each query point is (frame_idx, x, y). The model returns per-frame 2D
@@ -15,10 +15,11 @@ import numpy as np
 from app.backends.base import Detection, ModelBackend
 
 logger = logging.getLogger("grader.backends.cotracker")
+_TRACK_LABELS = ("green_tip", "pink_tip")
 
 
 class CoTrackerBackend(ModelBackend):
-    """Point tracking via Meta's Co-Tracker v2."""
+    """Point tracking via Meta's CoTracker offline predictor."""
 
     def __init__(self) -> None:
         self._model: Any = None
@@ -27,15 +28,14 @@ class CoTrackerBackend(ModelBackend):
         try:
             import torch
 
-            logger.info("Loading Co-Tracker v2 model from %s", path)
+            logger.info("Loading CoTracker model from %s", path)
             checkpoint = torch.load(path, map_location="cpu", weights_only=False)
 
-            # CoTracker v2 checkpoint may contain the model directly or
-            # a state_dict wrapper. Handle both cases.
+            # Some checkpoints deserialize directly to a model, while others
+            # require instantiating the predictor class from the CoTracker package.
             if hasattr(checkpoint, "eval"):
                 self._model = checkpoint
             else:
-                # Try loading via cotracker API
                 from cotracker.predictor import CoTrackerPredictor
                 self._model = CoTrackerPredictor(checkpoint=path)
 
@@ -43,15 +43,16 @@ class CoTrackerBackend(ModelBackend):
                 self._model.eval()
             if torch.cuda.is_available() and hasattr(self._model, "cuda"):
                 self._model = self._model.cuda()
-            logger.info("Co-Tracker v2 model loaded")
+            logger.info("CoTracker model loaded")
         except Exception as exc:
-            logger.error("Failed to load Co-Tracker v2: %s", exc)
+            logger.error("Failed to load CoTracker model: %s", exc)
             raise
 
     def detect(
         self,
         frames: list[np.ndarray],
         query_points: np.ndarray | None = None,
+        query_labels: list[str] | tuple[str, ...] | None = None,
         on_progress: Callable[[int, int], None] | None = None,
     ) -> list[list[Detection]]:
         """Track instrument tips across frames using query points.
@@ -62,8 +63,8 @@ class CoTrackerBackend(ModelBackend):
             BGR video frames.
         query_points : np.ndarray, optional
             (N, 3) array of [frame_idx, x, y]. Each row defines a point
-            to track from the given frame. Labels alternate: even indices
-            are ``left_tip``, odd indices are ``right_tip``.
+            to track from the given frame. The first two query points map
+            to ``green_tip`` and ``pink_tip`` respectively.
 
         Returns
         -------
@@ -96,16 +97,22 @@ class CoTrackerBackend(ModelBackend):
                 else:
                     pred = self._model(video)
 
-            # pred.tracks: (1, T, N, 2) -- N tracked points across T frames
-            tracks = pred.tracks[0].cpu().numpy()  # (T, N, 2)
-            visibility = pred.visibility[0].cpu().numpy()  # (T, N)
+            tracks_tensor, visibility_tensor = _extract_prediction_tensors(pred)
+            tracks = tracks_tensor[0].cpu().numpy()  # (T, N, 2)
+            visibility = visibility_tensor[0].cpu().numpy()  # (T, N)
             n_points = tracks.shape[1]
 
             # Determine labels for each tracked point
             labels: list[str] = []
-            if query_points is not None and len(query_points) > 0:
+            if query_labels is not None and len(query_labels) >= n_points:
+                labels = [str(query_labels[i]) for i in range(n_points)]
+            elif query_points is not None and len(query_points) > 0:
                 for i in range(n_points):
-                    labels.append("left_tip" if i % 2 == 0 else "right_tip")
+                    labels.append(
+                        _TRACK_LABELS[i]
+                        if i < len(_TRACK_LABELS)
+                        else f"instrument_{i + 1}_tip"
+                    )
             else:
                 labels = [f"point_{i}" for i in range(n_points)]
 
@@ -121,6 +128,7 @@ class CoTrackerBackend(ModelBackend):
                                 y=float(tracks[t, p, 1]),
                                 confidence=vis,
                                 label=labels[p],
+                                source="cotracker",
                             )
                         )
                 all_detections.append(detections)
@@ -129,14 +137,14 @@ class CoTrackerBackend(ModelBackend):
                     on_progress(current, tracks.shape[0])
 
             logger.info(
-                "Co-Tracker v2: tracked %d points across %d frames",
+                "CoTracker: tracked %d points across %d frames",
                 n_points,
                 len(frames),
             )
             return all_detections
 
         except Exception as exc:
-            logger.warning("Co-Tracker v2 inference failed, returning empty: %s", exc)
+            logger.warning("CoTracker inference failed, returning empty: %s", exc)
             return [[] for _ in frames]
 
     def unload(self) -> None:
@@ -149,4 +157,23 @@ class CoTrackerBackend(ModelBackend):
                 torch.cuda.empty_cache()
         except ImportError:
             pass
-        logger.info("Co-Tracker v2 model unloaded")
+        logger.info("CoTracker model unloaded")
+
+
+def _extract_prediction_tensors(pred: Any) -> tuple[Any, Any]:
+    """Handle both legacy object-style and tuple-style CoTracker outputs."""
+
+    if isinstance(pred, tuple) and len(pred) >= 2:
+        return pred[0], pred[1]
+
+    if isinstance(pred, dict):
+        tracks = pred.get("tracks")
+        visibility = pred.get("visibility")
+        if tracks is not None and visibility is not None:
+            return tracks, visibility
+
+    tracks = getattr(pred, "tracks", None)
+    visibility = getattr(pred, "visibility", None)
+    if tracks is None or visibility is None:
+        raise ValueError("Unsupported CoTracker output format")
+    return tracks, visibility

@@ -22,6 +22,7 @@ class PlaceholderBackend(ModelBackend):
         self,
         frames: list[np.ndarray],
         query_points: np.ndarray | None = None,
+        query_labels: list[str] | tuple[str, ...] | None = None,
         on_progress: Callable[[int, int], None] | None = None,
     ) -> list[list[Detection]]:
         if not frames:
@@ -46,13 +47,15 @@ class PlaceholderBackend(ModelBackend):
                     x=float(left_x),
                     y=float(left_y),
                     confidence=float(rng.uniform(0.85, 0.99)),
-                    label="left_tip",
+                    label="green_tip",
+                    source="placeholder",
                 ),
                 Detection(
                     x=float(right_x),
                     y=float(right_y),
                     confidence=float(rng.uniform(0.85, 0.99)),
-                    label="right_tip",
+                    label="pink_tip",
+                    source="placeholder",
                 ),
             ]
             all_detections.append(detections)

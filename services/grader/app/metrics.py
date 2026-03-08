@@ -22,6 +22,7 @@ from scipy.spatial import ConvexHull
 from app.config import DEFAULT_FPS
 
 logger = logging.getLogger("grader.metrics")
+_POSE_META_KEYS = {"frame_idx", "timestamp"}
 
 
 # ---------------------------------------------------------------------------
@@ -38,6 +39,45 @@ def _collect_points(
     if not pts:
         return np.empty((0, 3), dtype=np.float64)
     return np.array(pts, dtype=np.float64)
+
+
+def _workspace_volume(points: np.ndarray) -> float:
+    if len(points) < 4:
+        return 0.0
+    try:
+        hull = ConvexHull(points)
+        return float(hull.volume) * 1e6
+    except Exception as exc:
+        logger.warning("ConvexHull failed: %s", exc)
+        return 0.0
+
+
+def _tip_labels(poses: list[dict[str, Any]]) -> list[str]:
+    labels: set[str] = set()
+    for pose in poses:
+        for key in pose:
+            if key not in _POSE_META_KEYS:
+                labels.add(key)
+    return sorted(labels)
+
+
+def _summarize_points(
+    points: np.ndarray,
+    dt: float,
+    total_time: float,
+) -> tuple[dict[str, float], np.ndarray]:
+    path_length = _path_length(points) * 1000.0
+    speeds = _compute_speeds(points, dt) * 1000.0
+    avg_speed = float(np.mean(speeds)) if len(speeds) > 0 else 0.0
+    summary = {
+        "workspace_volume": round(_workspace_volume(points), 4),
+        "avg_speed": round(avg_speed, 4),
+        "max_jerk": round(_compute_max_jerk(points, dt) * 1000.0, 4),
+        "path_length": round(path_length, 4),
+        "economy_of_motion": round(_economy(points), 6),
+        "total_time": round(total_time, 3),
+    }
+    return summary, speeds
 
 
 def _path_length(points: np.ndarray) -> float:
@@ -120,63 +160,60 @@ def calculate_metrics(
     if fps is None or fps <= 0:
         fps = DEFAULT_FPS
 
-    left_pts = _collect_points(poses, "left_tip")
-    right_pts = _collect_points(poses, "right_tip")
+    tip_labels = _tip_labels(poses)
 
-    # --- workspace volume (cm^3) -------------------------------------------
-    # Combine all tip positions for the convex hull.
-    all_pts = np.concatenate(
-        [p for p in (left_pts, right_pts) if len(p) > 0], axis=0
-    ) if (len(left_pts) + len(right_pts)) > 0 else np.empty((0, 3))
-
-    workspace_volume = 0.0
-    if len(all_pts) >= 4:
-        try:
-            hull = ConvexHull(all_pts)
-            # Points are in metres; convert volume to cm^3 (1 m^3 = 1e6 cm^3).
-            workspace_volume = float(hull.volume) * 1e6
-        except Exception as exc:
-            logger.warning("ConvexHull failed: %s", exc)
-
-    # --- time step between sampled frames -----------------------------------
     dt = 1.0 / fps  # seconds between consecutive sampled frames
 
-    # --- total time ---------------------------------------------------------
     if len(poses) >= 2:
         total_time = poses[-1]["timestamp"] - poses[0]["timestamp"]
     else:
         total_time = 0.0
 
-    # --- path length (mm) ---------------------------------------------------
-    left_path = _path_length(left_pts) * 1000.0   # m -> mm
-    right_path = _path_length(right_pts) * 1000.0
-    path_length = left_path + right_path
+    per_instrument: dict[str, dict[str, float]] = {}
+    per_instrument_speeds: list[np.ndarray] = []
+    all_point_sets: list[np.ndarray] = []
+    per_instrument_jerk: list[float] = []
+    per_instrument_economy: list[float] = []
+    path_length = 0.0
 
-    # --- average speed (mm/s) -----------------------------------------------
-    left_speeds = _compute_speeds(left_pts, dt) * 1000.0
-    right_speeds = _compute_speeds(right_pts, dt) * 1000.0
-    all_speeds = np.concatenate([left_speeds, right_speeds]) if (
-        len(left_speeds) + len(right_speeds)
-    ) > 0 else np.array([0.0])
+    for label in tip_labels:
+        points = _collect_points(poses, label)
+        if len(points) > 0:
+            all_point_sets.append(points)
+        summary, speeds = _summarize_points(points, dt, total_time)
+        per_instrument[label] = summary
+        per_instrument_speeds.append(speeds)
+        if len(points) > 0:
+            per_instrument_jerk.append(summary["max_jerk"])
+            per_instrument_economy.append(summary["economy_of_motion"])
+        path_length += summary["path_length"]
+
+    all_pts = (
+        np.concatenate([points for points in all_point_sets if len(points) > 0], axis=0)
+        if all_point_sets
+        else np.empty((0, 3), dtype=np.float64)
+    )
+    all_speeds = (
+        np.concatenate([speeds for speeds in per_instrument_speeds if len(speeds) > 0])
+        if any(len(speeds) > 0 for speeds in per_instrument_speeds)
+        else np.array([0.0], dtype=np.float64)
+    )
     avg_speed = float(np.mean(all_speeds))
-
-    # --- max jerk (mm/s^3) --------------------------------------------------
-    left_jerk = _compute_max_jerk(left_pts, dt) * 1000.0
-    right_jerk = _compute_max_jerk(right_pts, dt) * 1000.0
-    max_jerk = max(left_jerk, right_jerk)
-
-    # --- economy of motion --------------------------------------------------
-    left_econ = _economy(left_pts)
-    right_econ = _economy(right_pts)
-    economy_of_motion = (left_econ + right_econ) / 2.0
+    max_jerk = max(per_instrument_jerk) if per_instrument_jerk else 0.0
+    economy_of_motion = (
+        float(np.mean(per_instrument_economy))
+        if per_instrument_economy
+        else 0.0
+    )
 
     metrics = {
-        "workspace_volume": round(workspace_volume, 4),
+        "workspace_volume": round(_workspace_volume(all_pts), 4),
         "avg_speed": round(avg_speed, 4),
         "max_jerk": round(max_jerk, 4),
         "path_length": round(path_length, 4),
         "economy_of_motion": round(economy_of_motion, 6),
         "total_time": round(total_time, 3),
+        "per_instrument": per_instrument,
     }
 
     logger.info("Calculated metrics: %s", metrics)

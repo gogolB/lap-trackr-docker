@@ -15,6 +15,7 @@ Capture and grade laparoscopic surgical training sessions using stereo cameras, 
 | [Database & Migrations](database.md) | PostgreSQL schema ownership, Redis job state, Alembic workflow, backup/restore |
 | [Data Model](data-model.md) | Database schema, session directory layout, file formats |
 | [Calibration Guide](calibration.md) | Camera calibration workflow and ChArUco board setup |
+| [Offline Grading Pipeline](offline-grading-pipeline.md) | Accuracy-first multi-pass grading design using SAM2 and CoTracker3 |
 | [ML Backends](ml-backends.md) | Instrument detection models and the tracking pipeline |
 | [Troubleshooting](troubleshooting.md) | Common issues and how to resolve them |
 
@@ -22,5 +23,6 @@ Capture and grade laparoscopic surgical training sessions using stereo cameras, 
 
 - **Production (Jetson)**: See [Jetson Setup](setup-jetson.md)
 - **Development (any machine)**: See [Development Setup](setup-dev.md)
+- **Offline grading design**: See [Offline Grading Pipeline](offline-grading-pipeline.md)
 - **Adding a new ML backend**: See [ML Backends](ml-backends.md#adding-a-new-backend)
 - **API integration**: See [API Reference](api-reference.md)

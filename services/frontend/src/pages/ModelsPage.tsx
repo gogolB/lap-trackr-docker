@@ -22,8 +22,6 @@ function formatBytes(bytes: number | null): string {
 
 const TYPE_LABELS: Record<string, string> = {
   cotracker: "Point Tracking",
-  sam2: "Segmentation",
-  tapir: "Point Tracking",
   yolo: "Detection",
 };
 
@@ -210,7 +208,7 @@ export default function ModelsPage() {
     if (fileInputRef.current) fileInputRef.current.value = "";
   };
 
-  const activeModel = models?.find((m) => m.is_active);
+  const activeModels = models?.filter((m) => m.is_active) ?? [];
 
   return (
     <div>
@@ -230,7 +228,7 @@ export default function ModelsPage() {
             disabled={uploadMut.isPending}
             className="rounded-lg bg-slate-700 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-slate-600 disabled:opacity-50"
           >
-            {uploadMut.isPending ? "Uploading..." : "Upload Custom Model"}
+            {uploadMut.isPending ? "Uploading..." : "Upload Custom YOLO Model"}
           </button>
         </div>
       </div>
@@ -242,20 +240,31 @@ export default function ModelsPage() {
       )}
 
       {/* Active model banner */}
-      {activeModel && (
+      {activeModels.length > 0 && (
         <div className="mb-6 rounded-xl border border-teal-500/30 bg-teal-500/10 p-4">
-          <div className="flex items-center gap-2">
-            <span className="text-teal-400 font-medium">Active:</span>
-            <span className="text-white font-semibold">{activeModel.name}</span>
-            {activeModel.is_custom && (
-              <span className="text-xs text-purple-400">(custom)</span>
-            )}
+          <div className="flex items-center gap-2 mb-2">
+            <span className="text-teal-400 font-medium">Active Models</span>
           </div>
-          {activeModel.description && (
-            <p className="mt-1 text-sm text-slate-400">
-              {activeModel.description}
-            </p>
-          )}
+          <div className="space-y-2">
+            {activeModels.map((model) => (
+              <div key={model.id}>
+                <div className="flex items-center gap-2">
+                  <span className="text-white font-semibold">{model.name}</span>
+                  <span className="text-xs text-slate-400">
+                    {TYPE_LABELS[model.model_type] ?? model.model_type}
+                  </span>
+                  {model.is_custom && (
+                    <span className="text-xs text-purple-400">(custom)</span>
+                  )}
+                </div>
+                {model.description && (
+                  <p className="mt-1 text-sm text-slate-400">
+                    {model.description}
+                  </p>
+                )}
+              </div>
+            ))}
+          </div>
         </div>
       )}
 

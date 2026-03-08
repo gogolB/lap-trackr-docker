@@ -147,13 +147,14 @@ def _get_session_dir(session_id: str) -> str | None:
     return None
 
 
-def get_active_model_info() -> dict[str, Any] | None:
-    """Return info about the currently active ML model, or None."""
+def get_active_model_info(model_type: str | None = None) -> dict[str, Any] | None:
+    """Return info about the active ML model for a given type, or None."""
     engine = _get_engine()
+    stmt = ml_models_table.select().where(ml_models_table.c.is_active == True)  # noqa: E712
+    if model_type:
+        stmt = stmt.where(ml_models_table.c.model_type == model_type)
     with engine.begin() as conn:
-        row = conn.execute(
-            ml_models_table.select().where(ml_models_table.c.is_active == True)  # noqa: E712
-        ).first()
+        row = conn.execute(stmt.order_by(ml_models_table.c.created_at.asc())).first()
     if row is None:
         return None
     return {

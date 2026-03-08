@@ -13,6 +13,7 @@ from app.backends.base import Detection
 from app.pose_estimator import _lookup_depth, _pixel_to_3d, _transform_point
 
 logger = logging.getLogger("grader.fusion")
+_POSE_META_KEYS = {"frame_idx", "timestamp"}
 
 
 class StereoFusionError(Exception):
@@ -81,7 +82,8 @@ def fuse_dual_camera(
     2. Monocular depth back-projection from off-axis (transformed to on-axis frame)
     3. Stereo triangulation using T_on_to_off
 
-    Returns list of pose dicts with frame_idx, timestamp, left_tip, right_tip.
+    Returns list of pose dicts with frame_idx, timestamp, and one key per
+    tracked instrument-tip label.
     """
     T_on_to_off = np.array(stereo_calib["T_on_to_off"], dtype=np.float64)
     try:
@@ -100,6 +102,14 @@ def fuse_dual_camera(
 
     n_frames = min(len(on_detections), len(off_detections))
     poses: list[dict[str, Any]] = []
+    tip_labels = sorted(
+        {
+            det.label
+            for frame_dets in (*on_detections, *off_detections)
+            for det in frame_dets
+            if det.label
+        }
+    )
 
     for frame_idx in range(n_frames):
         timestamp = frame_idx / fps
@@ -109,11 +119,11 @@ def fuse_dual_camera(
         result: dict[str, Any] = {
             "frame_idx": frame_idx,
             "timestamp": round(timestamp, 6),
-            "left_tip": None,
-            "right_tip": None,
         }
+        for label in tip_labels:
+            result[label] = None
 
-        for label in ("left_tip", "right_tip"):
+        for label in tip_labels:
             points: list[tuple[list[float], float]] = []  # (point, weight)
 
             # Strategy 1: On-axis monocular depth
@@ -170,6 +180,9 @@ def fuse_dual_camera(
 
         poses.append(result)
 
-    valid = sum(1 for p in poses if p["left_tip"] is not None and p["right_tip"] is not None)
-    logger.info("Fused 3D poses for %d frames (%d with both tips)", len(poses), valid)
+    valid_counts = {
+        label: sum(1 for pose in poses if pose.get(label) is not None)
+        for label in tip_labels
+    }
+    logger.info("Fused 3D poses for %d frames with valid labels %s", len(poses), valid_counts)
     return poses

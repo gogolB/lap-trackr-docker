@@ -1,0 +1,8 @@
+redis>=5.0,<6.0
+sqlalchemy>=2.0,<3.0
+psycopg2-binary>=2.9,<3.0
+numpy>=1.26,<2.0
+scipy>=1.11,<1.15
+opencv-python-headless>=4.10,<5.0
+ultralytics>=8.3,<9.0
+git+https://github.com/facebookresearch/co-tracker.git

@@ -45,6 +45,24 @@ function formatDuration(seconds: number | null): string {
   return `${mins}m ${secs}s`;
 }
 
+function formatMetricValue(value: number | null | undefined): string {
+  if (value === undefined || value === null) return "N/A";
+  return Number.isFinite(value) ? value.toFixed(2) : "N/A";
+}
+
+function formatInstrumentName(label: string): string {
+  return label
+    .replace(/_tip$/i, "")
+    .replace(/_/g, " ")
+    .replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+function instrumentDotClass(label: string): string {
+  if (label.includes("green") || label.includes("left")) return "bg-emerald-400";
+  if (label.includes("pink") || label.includes("right")) return "bg-pink-400";
+  return "bg-cyan-400";
+}
+
 const METRIC_LABELS: Record<string, { label: string; unit: string }> = {
   workspace_volume: { label: "Workspace Volume", unit: "cm\u00B3" },
   avg_speed: { label: "Average Speed", unit: "cm/s" },
@@ -196,7 +214,6 @@ export default function SessionDetail() {
   const [isRetrying, setIsRetrying] = useState(false);
   const [isReExporting, setIsReExporting] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
-  const [isDownloading, setIsDownloading] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [actionError, setActionError] = useState("");
 
@@ -240,6 +257,7 @@ export default function SessionDetail() {
     try {
       await gradeSession(id);
       queryClient.invalidateQueries({ queryKey: ["session", id] });
+      queryClient.invalidateQueries({ queryKey: ["progress", id] });
     } catch (err) {
       setActionError(
         err instanceof Error ? err.message : "Failed to submit for grading."
@@ -256,6 +274,7 @@ export default function SessionDetail() {
     try {
       await retrySession(id);
       queryClient.invalidateQueries({ queryKey: ["session", id] });
+      queryClient.invalidateQueries({ queryKey: ["progress", id] });
     } catch (err) {
       setActionError(
         err instanceof Error ? err.message : "Failed to retry session."
@@ -285,15 +304,12 @@ export default function SessionDetail() {
   const handleDownload = async () => {
     if (!id) return;
     setActionError("");
-    setIsDownloading(true);
     try {
       await downloadSession(id);
     } catch (err) {
       setActionError(
         err instanceof Error ? err.message : "Failed to download session."
       );
-    } finally {
-      setIsDownloading(false);
     }
   };
 
@@ -347,11 +363,15 @@ export default function SessionDetail() {
           unit: METRIC_LABELS[key]?.unit ?? "",
         }))
     : [];
+  const perInstrumentMetrics = metrics?.per_instrument
+    ? Object.entries(metrics.per_instrument)
+    : [];
 
   const canReExport =
     (!!session.on_axis_path || !!session.off_axis_path) &&
     session.status !== "recording" &&
     session.status !== "grading";
+  const canGrade = session.status === "completed" || session.status === "graded";
   const exportStageProgress =
     session.status === "exporting"
       ? buildStageProgress(EXPORT_STAGES, progress)
@@ -429,32 +449,22 @@ export default function SessionDetail() {
             {(session.status === "completed" || session.status === "graded") && (
               <button
                 onClick={handleDownload}
-                disabled={isDownloading}
                 className="btn-secondary gap-2"
               >
-                {isDownloading ? (
-                  <>
-                    <span className="h-4 w-4 animate-spin rounded-full border-2 border-slate-400/30 border-t-slate-400" />
-                    Downloading...
-                  </>
-                ) : (
-                  <>
-                    <svg
-                      className="h-4 w-4"
-                      fill="none"
-                      viewBox="0 0 24 24"
-                      strokeWidth={2}
-                      stroke="currentColor"
-                    >
-                      <path
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                        d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12m4.5 4.5V3"
-                      />
-                    </svg>
-                    Download
-                  </>
-                )}
+                <svg
+                  className="h-4 w-4"
+                  fill="none"
+                  viewBox="0 0 24 24"
+                  strokeWidth={2}
+                  stroke="currentColor"
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12m4.5 4.5V3"
+                  />
+                </svg>
+                Download
               </button>
             )}
 
@@ -487,7 +497,7 @@ export default function SessionDetail() {
             )}
 
             {/* Submit for grading */}
-            {session.status === "completed" && (
+            {canGrade && (
               <button
                 onClick={handleGrade}
                 disabled={isGrading}
@@ -496,7 +506,7 @@ export default function SessionDetail() {
                 {isGrading ? (
                   <>
                     <span className="h-4 w-4 animate-spin rounded-full border-2 border-white/30 border-t-white" />
-                    Submitting...
+                    {session.status === "graded" ? "Re-submitting..." : "Submitting..."}
                   </>
                 ) : (
                   <>
@@ -513,7 +523,7 @@ export default function SessionDetail() {
                         d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
                       />
                     </svg>
-                    Submit for Grading
+                    {session.status === "graded" ? "Re-grade" : "Submit for Grading"}
                   </>
                 )}
               </button>
@@ -818,7 +828,9 @@ export default function SessionDetail() {
       )}
 
       {/* Warnings from grading */}
-      {session.grading_result?.warnings && session.grading_result.warnings.length > 0 && (
+      {session.status === "graded" &&
+        session.grading_result?.warnings &&
+        session.grading_result.warnings.length > 0 && (
         <div className="card border-amber-500/30">
           <div className="flex items-start gap-3">
             <svg
@@ -859,17 +871,45 @@ export default function SessionDetail() {
                     {meta.label}
                   </p>
                   <p className="mt-2 text-2xl font-bold text-white">
-                    {value !== undefined && value !== null
-                      ? typeof value === "number"
-                        ? value.toFixed(2)
-                        : value
-                      : "N/A"}
+                    {formatMetricValue(
+                      typeof value === "number" ? value : undefined
+                    )}
                   </p>
                   <p className="mt-0.5 text-xs text-slate-500">{meta.unit}</p>
                 </div>
               );
             })}
           </div>
+
+          {perInstrumentMetrics.length > 0 && (
+            <div className="grid gap-4 lg:grid-cols-2">
+              {perInstrumentMetrics.map(([label, instrumentMetrics]) => (
+                <div key={label} className="card">
+                  <div className="mb-4 flex items-center justify-between">
+                    <h2 className="text-lg font-semibold text-white">
+                      {formatInstrumentName(label)}
+                    </h2>
+                    <span
+                      className={`inline-flex h-2.5 w-2.5 rounded-full ${instrumentDotClass(label)}`}
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    {Object.entries(METRIC_LABELS).map(([key, meta]) => (
+                      <div
+                        key={`${label}-${key}`}
+                        className="flex items-center justify-between text-sm"
+                      >
+                        <span className="text-slate-400">{meta.label}</span>
+                        <span className="font-medium text-white">
+                          {formatMetricValue(instrumentMetrics[key as keyof typeof instrumentMetrics])} {meta.unit}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
 
           {/* Bar chart */}
           <div className="card">

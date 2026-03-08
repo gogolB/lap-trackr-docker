@@ -193,30 +193,19 @@ export async function getSessionProgress(id: string): Promise<JobProgress> {
 
 export async function downloadSession(id: string): Promise<void> {
   const token = getToken();
-  const headers: Record<string, string> = {};
-  if (token) {
-    headers["Authorization"] = `Bearer ${token}`;
+  if (!token) {
+    throw new Error("Not authenticated");
   }
 
-  const response = await fetch(`${BASE_URL}/api/sessions/${id}/download`, {
-    headers,
-  });
-
-  if (!response.ok) {
-    throw new Error(`Download failed: ${response.statusText}`);
-  }
-
-  const blob = await response.blob();
-  const url = URL.createObjectURL(blob);
+  // Use native browser download — handles large files with built-in progress bar
+  // instead of loading the entire ZIP into browser memory via blob()
+  const downloadUrl = `${BASE_URL}/api/sessions/${id}/download?token=${encodeURIComponent(token)}`;
   const a = document.createElement("a");
-  a.href = url;
-  const disposition = response.headers.get("Content-Disposition");
-  const match = disposition?.match(/filename="?([^"]+)"?/);
-  a.download = match?.[1] ?? `session_${id}.zip`;
+  a.href = downloadUrl;
+  a.style.display = "none";
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
-  URL.revokeObjectURL(url);
 }
 
 // ---- Grading ----
@@ -264,7 +253,17 @@ export interface MetricsData {
   path_length: number;
   economy_of_motion: number;
   total_time: number;
-  [key: string]: number;
+  per_instrument?: Record<
+    string,
+    {
+      workspace_volume: number;
+      avg_speed: number;
+      max_jerk: number;
+      path_length: number;
+      economy_of_motion: number;
+      total_time: number;
+    }
+  >;
 }
 
 export async function getMetrics(sessionId: string): Promise<MetricsData> {
@@ -274,8 +273,7 @@ export async function getMetrics(sessionId: string): Promise<MetricsData> {
 export interface PoseData {
   frame_idx: number;
   timestamp: number;
-  left_tip: number[];
-  right_tip: number[];
+  [key: string]: number | number[] | null;
 }
 
 export async function getPoses(sessionId: string): Promise<PoseData[]> {

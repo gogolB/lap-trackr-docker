@@ -14,6 +14,8 @@ const COLORS: Record<string, string> = {
   pink: "#ec4899",
 };
 const LABEL_COLORS: Record<string, string> = {
+  green_tip: "#22c55e",
+  pink_tip: "#ec4899",
   left_tip: "#22c55e",
   right_tip: "#ec4899",
 };
@@ -203,16 +205,20 @@ export default function TipInitPage() {
     if (!coords) return;
 
     const frameMarkers = markers[selectedFrame] || [];
-    const hasLeft = frameMarkers.some((m) => m.label === "left_tip");
-    const hasRight = frameMarkers.some((m) => m.label === "right_tip");
+    const hasGreen = frameMarkers.some(
+      (m) => m.label === "green_tip" || m.label === "left_tip"
+    );
+    const hasPink = frameMarkers.some(
+      (m) => m.label === "pink_tip" || m.label === "right_tip"
+    );
 
     let label: string;
     let color: string;
-    if (!hasLeft) {
-      label = "left_tip";
+    if (!hasGreen) {
+      label = "green_tip";
       color = "green";
-    } else if (!hasRight) {
-      label = "right_tip";
+    } else if (!hasPink) {
+      label = "pink_tip";
       color = "pink";
     } else {
       return; // Both tips already placed

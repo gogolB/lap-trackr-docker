@@ -17,7 +17,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.core.auth import get_current_user
+from app.core.auth import get_current_user, get_current_user_or_token
 from app.core.config import settings
 from app.core.database import get_db
 from app.models.models import CameraConfig, Session, SessionStatus, User
@@ -96,9 +96,6 @@ def _build_grading_job(session: Session) -> str:
 
 
 def _derive_post_export_status(session: Session) -> SessionStatus:
-    if session.status == SessionStatus.graded:
-        return SessionStatus.graded
-
     session_dir = _session_dir(session)
     if session_dir and (session_dir / "tip_init.json").exists():
         return SessionStatus.completed
@@ -109,6 +106,7 @@ def _derive_post_export_status(session: Session) -> SessionStatus:
 def _build_export_job(
     session: Session,
     post_export_status: SessionStatus | None = None,
+    reset_tip_init: bool = False,
 ) -> str:
     target_status = post_export_status or _derive_post_export_status(session)
     return json.dumps(
@@ -117,6 +115,7 @@ def _build_export_job(
             "on_axis_path": session.on_axis_path,
             "off_axis_path": session.off_axis_path,
             "post_export_status": target_status.value,
+            "reset_tip_init": reset_tip_init,
         }
     )
 
@@ -367,16 +366,20 @@ async def grade_session(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Session not found"
         )
-    if session.status != SessionStatus.completed:
+    if session.status not in (SessionStatus.completed, SessionStatus.graded):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail=f"Session must be completed before grading (current status: {session.status.value})",
+            detail=(
+                "Session must be completed or graded before grading "
+                f"(current status: {session.status.value})"
+            ),
         )
 
     job_payload = _build_grading_job(session)
 
-    r = redis.from_url(settings.REDIS_URL)
+    r = redis.from_url(settings.REDIS_URL, decode_responses=True)
     try:
+        await r.delete(f"{JOB_PROGRESS_KEY_PREFIX}{session.id}")
         await r.lpush("grading_jobs", job_payload)
     except Exception:
         raise HTTPException(
@@ -429,7 +432,14 @@ async def re_export_session(
         else:
             await r.delete(cancel_key)
         await r.delete(progress_key)
-        await r.lpush("export_jobs", _build_export_job(session))
+        await r.lpush(
+            "export_jobs",
+            _build_export_job(
+                session,
+                post_export_status=SessionStatus.awaiting_init,
+                reset_tip_init=True,
+            ),
+        )
         session.status = SessionStatus.exporting
     except Exception:
         raise HTTPException(
@@ -467,10 +477,23 @@ async def retry_session(
             detail=f"Only failed or export_failed sessions can be retried (current status: {session.status.value})",
         )
 
-    r = redis.from_url(settings.REDIS_URL)
+    r = redis.from_url(settings.REDIS_URL, decode_responses=True)
     try:
+        await r.delete(f"{JOB_PROGRESS_KEY_PREFIX}{session.id}")
         if session.status == SessionStatus.export_failed:
-            await r.lpush("export_jobs", _build_export_job(session))
+            await r.delete(f"{EXPORT_CANCEL_KEY_PREFIX}{session.id}")
+            session_dir = _session_dir(session)
+            reset_tip_init = bool(
+                session_dir and (session_dir / "tip_init.json").exists()
+            )
+            await r.lpush(
+                "export_jobs",
+                _build_export_job(
+                    session,
+                    post_export_status=SessionStatus.awaiting_init,
+                    reset_tip_init=reset_tip_init,
+                ),
+            )
             session.status = SessionStatus.exporting
         else:
             await r.lpush("grading_jobs", _build_grading_job(session))
@@ -552,13 +575,21 @@ async def get_session_progress(
     }
 
 
+EXCLUDED_EXTENSIONS = {".svo2"}
+
+
 @router.get("/{session_id}/download")
 async def download_session(
     session_id: UUID,
-    current_user: User = Depends(get_current_user),
+    include_raw: bool = Query(False, description="Include raw .svo2 recordings"),
+    current_user: User = Depends(get_current_user_or_token),
     db: AsyncSession = Depends(get_db),
 ):
-    """Stream a ZIP of the session directory (MP4, NPZ, calibration, metadata, results)."""
+    """Stream a ZIP of the session directory (MP4, NPZ, calibration, metadata, results).
+
+    Raw .svo2 recordings are excluded by default (they require ZED SDK).
+    Pass ?include_raw=true to include them.
+    """
     result = await db.execute(
         select(Session).where(
             Session.id == session_id, Session.user_id == current_user.id
@@ -588,9 +619,12 @@ async def download_session(
             detail="Session directory not found on disk",
         )
 
-    # Build ZIP on disk to avoid OOM on large sessions
-    tmp_path = await asyncio.to_thread(_build_session_zip, session_dir)
+    exclude = set() if include_raw else EXCLUDED_EXTENSIONS
 
+    # Build ZIP on disk to avoid OOM on large sessions
+    tmp_path = await asyncio.to_thread(_build_session_zip, session_dir, exclude)
+
+    file_size = os.path.getsize(tmp_path)
     timestamp = session.started_at.strftime("%Y-%m-%d_%H-%M-%S")
     filename = f"session_{timestamp}.zip"
 
@@ -608,20 +642,30 @@ async def download_session(
     return StreamingResponse(
         stream_and_cleanup(),
         media_type="application/zip",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Content-Length": str(file_size),
+            "X-Accel-Buffering": "no",
+        },
     )
 
 
-def _build_session_zip(session_dir: Path) -> str:
+def _build_session_zip(
+    session_dir: Path, exclude_extensions: set[str] | None = None
+) -> str:
     """Build ZIP on disk, return temp file path."""
+    exclude = exclude_extensions or set()
     fd, tmp_path = tempfile.mkstemp(suffix=".zip")
     try:
         with os.fdopen(fd, "wb") as f:
             with zipfile.ZipFile(f, "w", zipfile.ZIP_DEFLATED) as zf:
                 for file_path in sorted(session_dir.rglob("*")):
-                    if file_path.is_file() and not file_path.is_symlink():
-                        arcname = file_path.relative_to(session_dir)
-                        zf.write(file_path, arcname)
+                    if not file_path.is_file() or file_path.is_symlink():
+                        continue
+                    if file_path.suffix.lower() in exclude:
+                        continue
+                    arcname = file_path.relative_to(session_dir)
+                    zf.write(file_path, arcname)
     except Exception:
         os.unlink(tmp_path)
         raise

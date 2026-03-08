@@ -184,16 +184,25 @@ async def activate_model(
     if model.status not in (ModelStatus.ready, ModelStatus.active, ModelStatus.custom):
         raise HTTPException(400, f"Model status is '{model.status}', cannot activate")
 
-    # Deactivate all non-custom others → set status back to ready
+    # Only one active model per type. Other types remain active.
     await db.execute(
         update(MLModel)
-        .where(MLModel.is_active == True, MLModel.id != model_id, MLModel.is_custom == False)  # noqa: E712
+        .where(
+            MLModel.is_active == True,  # noqa: E712
+            MLModel.id != model_id,
+            MLModel.model_type == model.model_type,
+            MLModel.is_custom == False,  # noqa: E712
+        )
         .values(is_active=False, status=ModelStatus.ready)
     )
-    # Deactivate custom others → keep status as custom
     await db.execute(
         update(MLModel)
-        .where(MLModel.is_active == True, MLModel.id != model_id, MLModel.is_custom == True)  # noqa: E712
+        .where(
+            MLModel.is_active == True,  # noqa: E712
+            MLModel.id != model_id,
+            MLModel.model_type == model.model_type,
+            MLModel.is_custom == True,  # noqa: E712
+        )
         .values(is_active=False)
     )
 

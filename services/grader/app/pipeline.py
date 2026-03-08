@@ -4,12 +4,19 @@ from __future__ import annotations
 
 import json
 import logging
+from dataclasses import dataclass
+from math import hypot
 from pathlib import Path
 from typing import Any, Callable, Optional
 
 import numpy as np
 
+from app.backends.base import Detection
 from app.camera_transform import adjust_calibration
+from app.color_detector import analyze_tip_frame
+from app.config import FRAME_SAMPLE_INTERVAL
+from app.db import get_active_model_info
+from app.exporter import _build_candidate_frame_indices
 from app.metrics import calculate_metrics
 from app.model_loader import get_backend
 from app.pose_estimator import estimate_poses, estimate_poses_dual
@@ -23,6 +30,48 @@ from app.tracking_renderer import (
 ProgressCallback = Optional[Callable[[str, int, int, str], None]]
 
 logger = logging.getLogger("grader.pipeline")
+_TRACK_LABELS = ("green_tip", "pink_tip")
+_QUERY_LABEL_ORDER = {
+    "green_tip": 0,
+    "pink_tip": 1,
+    "left_tip": 0,
+    "right_tip": 1,
+}
+_LEGACY_LABEL_MAP = {
+    "left_tip": "green_tip",
+    "right_tip": "pink_tip",
+}
+_MERGE_DISTANCE_RATIO = 0.03
+_TRACKER_BLEND_WEIGHT = 0.8
+_YOLO_BLEND_WEIGHT = 0.75
+_COLOR_BLEND_WEIGHT = 0.9
+_INTERPOLATE_MAX_GAP = 6
+_INTERPOLATE_DISTANCE_RATIO = 0.08
+_SMOOTH_WINDOW = 7
+_SMOOTH_POLYORDER = 2
+
+
+@dataclass(frozen=True)
+class _DetectionMergeSummary:
+    tracker_primary: int = 0
+    yolo_primary: int = 0
+    color_primary: int = 0
+    missing: int = 0
+
+
+@dataclass(frozen=True)
+class _QueryPointSet:
+    points: np.ndarray
+    labels: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class _TipInitCandidate:
+    label: str
+    frame_idx: int
+    x: float
+    y: float
+    confidence: float
 
 
 def _results_dir(job: dict) -> Path:
@@ -55,7 +104,170 @@ def _load_calibration(job: dict, key: str = "calibration_path") -> dict | None:
         return None
 
 
-def _load_query_points(job: dict) -> np.ndarray | None:
+def _canonical_tip_label(label: str | None, color: str | None = None) -> str | None:
+    if label:
+        normalized = _LEGACY_LABEL_MAP.get(label, label)
+        if normalized in _TRACK_LABELS:
+            return normalized
+    if color == "green":
+        return "green_tip"
+    if color == "pink":
+        return "pink_tip"
+    return None
+
+
+def _session_dir_from_job(job: dict) -> Path | None:
+    tip_init_path = job.get("tip_init_path")
+    if tip_init_path:
+        return Path(tip_init_path).parent
+    on_axis_path = job.get("on_axis_path")
+    if on_axis_path:
+        return Path(on_axis_path).parent
+    return None
+
+
+def _load_tip_init_sample_manifest(session_dir: Path | None) -> dict[str, dict[str, Any]]:
+    if session_dir is None:
+        return {}
+
+    manifest_path = session_dir / "tip_init_samples.json"
+    if manifest_path.exists():
+        try:
+            data = json.loads(manifest_path.read_text())
+            if isinstance(data, dict):
+                return data
+        except Exception:
+            logger.warning("Failed to parse %s", manifest_path, exc_info=True)
+
+    aggregated: dict[str, dict[str, Any]] = {}
+    for camera_name in ("on_axis", "off_axis"):
+        export_meta_path = session_dir / f"{camera_name}_export.json"
+        if not export_meta_path.exists():
+            continue
+        try:
+            export_meta = json.loads(export_meta_path.read_text())
+        except Exception:
+            logger.warning("Failed to parse %s", export_meta_path, exc_info=True)
+            continue
+        for entry in export_meta.get("sample_frames", []):
+            filename = entry.get("filename")
+            frame_idx = entry.get("frame_idx")
+            if filename is None or frame_idx is None:
+                continue
+            aggregated[str(filename)] = {
+                "camera": camera_name,
+                "frame_idx": int(frame_idx),
+            }
+
+    return aggregated
+
+
+def _match_sample_frame_index(
+    session_dir: Path,
+    camera_name: str,
+    filename: str,
+) -> int | None:
+    try:
+        import cv2
+    except ImportError:
+        return None
+
+    sample_path = session_dir / filename
+    mp4_path = session_dir / f"{camera_name}_left.mp4"
+    if not sample_path.exists() or not mp4_path.exists():
+        return None
+
+    sample = cv2.imread(str(sample_path))
+    if sample is None:
+        return None
+
+    cap = cv2.VideoCapture(str(mp4_path))
+    if not cap.isOpened():
+        return None
+
+    try:
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        candidates = _build_candidate_frame_indices(total_frames) or list(range(max(total_frames, 0)))
+        sample_small = cv2.resize(sample, (160, 90), interpolation=cv2.INTER_AREA)
+        best_idx: int | None = None
+        best_score: float | None = None
+        for frame_idx in candidates:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, int(frame_idx))
+            ret, frame = cap.read()
+            if not ret or frame is None:
+                continue
+            frame_small = cv2.resize(frame, (160, 90), interpolation=cv2.INTER_AREA)
+            score = float(np.mean(np.abs(frame_small.astype(np.float32) - sample_small.astype(np.float32))))
+            if best_score is None or score < best_score:
+                best_idx = int(frame_idx)
+                best_score = score
+        if best_idx is not None:
+            logger.info(
+                "Recovered sample frame index for %s/%s -> %d (score=%.3f)",
+                camera_name,
+                filename,
+                best_idx,
+                best_score or 0.0,
+            )
+        return best_idx
+    finally:
+        cap.release()
+
+
+def _resolve_sample_frame_index(
+    session_dir: Path | None,
+    camera_name: str,
+    filename: str,
+    manifest: dict[str, dict[str, Any]],
+) -> int | None:
+    entry = manifest.get(filename)
+    if entry is not None:
+        try:
+            camera = str(entry.get("camera", camera_name))
+            if camera_name in filename or camera == camera_name:
+                return int(entry["frame_idx"])
+        except Exception:
+            logger.warning("Invalid sample manifest entry for %s", filename, exc_info=True)
+
+    if session_dir is None:
+        return None
+
+    recovered = _match_sample_frame_index(session_dir, camera_name, filename)
+    if recovered is not None:
+        manifest[filename] = {
+            "camera": camera_name,
+            "frame_idx": recovered,
+        }
+    return recovered
+
+
+def _normalize_tip_init_detections(
+    detections: list[dict[str, Any]],
+) -> dict[str, _TipInitCandidate]:
+    normalized: dict[str, _TipInitCandidate] = {}
+    for det in detections:
+        label = _canonical_tip_label(det.get("label"), det.get("color"))
+        if label is None:
+            continue
+        confidence = float(det.get("confidence", 1.0))
+        candidate = _TipInitCandidate(
+            label=label,
+            frame_idx=0,
+            x=float(det["x"]),
+            y=float(det["y"]),
+            confidence=confidence,
+        )
+        previous = normalized.get(label)
+        if previous is None or candidate.confidence >= previous.confidence:
+            normalized[label] = candidate
+    return normalized
+
+
+def _load_query_points(
+    job: dict,
+    camera_name: str | None = None,
+    sample_interval: int = FRAME_SAMPLE_INTERVAL,
+) -> _QueryPointSet | None:
     """Load query points from tip_init.json in the session directory."""
     tip_init_path = job.get("tip_init_path")
 
@@ -71,20 +283,76 @@ def _load_query_points(job: dict) -> np.ndarray | None:
 
     try:
         tip_data = json.loads(Path(tip_init_path).read_text())
-        # tip_data is {filename: [{label, x, y, confidence, color}, ...]}
-        # Convert to (N, 3) array of [frame_idx=0, x, y]
-        # Use detections from the first available frame
-        points: list[list[float]] = []
-        for detections in tip_data.values():
-            for det in detections:
-                points.append([0.0, float(det["x"]), float(det["y"])])
-            if points:
-                break  # Use first frame's detections
+        session_dir = _session_dir_from_job(job)
+        manifest = _load_tip_init_sample_manifest(session_dir)
+        best_by_label: dict[str, _TipInitCandidate] = {}
+        items = list(tip_data.items())
+        if camera_name:
+            filtered_items = [
+                (filename, detections)
+                for filename, detections in items
+                if camera_name in filename
+            ]
+            if not filtered_items:
+                logger.info("No tip-init samples found for camera=%s", camera_name)
+                return None
+            items = filtered_items
 
-        if points:
-            qp = np.array(points, dtype=np.float32)
-            logger.info("Loaded %d query points from tip_init.json", len(qp))
-            return qp
+        for filename, detections in items:
+            if camera_name is None:
+                inferred_camera = "off_axis" if "off_axis" in filename else "on_axis"
+            else:
+                inferred_camera = camera_name
+            frame_idx = _resolve_sample_frame_index(
+                session_dir,
+                inferred_camera,
+                filename,
+                manifest,
+            )
+            if frame_idx is None:
+                continue
+
+            sampled_frame_idx = max(0, int(round(frame_idx / max(sample_interval, 1))))
+            normalized_detections = _normalize_tip_init_detections(detections)
+            for label, candidate in normalized_detections.items():
+                frame_candidate = _TipInitCandidate(
+                    label=label,
+                    frame_idx=sampled_frame_idx,
+                    x=candidate.x,
+                    y=candidate.y,
+                    confidence=candidate.confidence,
+                )
+                previous = best_by_label.get(label)
+                if previous is None or (
+                    frame_candidate.confidence,
+                    -frame_candidate.frame_idx,
+                ) > (
+                    previous.confidence,
+                    -previous.frame_idx,
+                ):
+                    best_by_label[label] = frame_candidate
+
+        ordered_candidates = [
+            best_by_label[label]
+            for label in _TRACK_LABELS
+            if label in best_by_label
+        ]
+        if ordered_candidates:
+            qp = np.array(
+                [
+                    [float(candidate.frame_idx), candidate.x, candidate.y]
+                    for candidate in ordered_candidates
+                ],
+                dtype=np.float32,
+            )
+            labels = tuple(candidate.label for candidate in ordered_candidates)
+            logger.info(
+                "Loaded %d query points from tip_init.json for camera=%s using labels=%s",
+                len(ordered_candidates),
+                camera_name or "any",
+                labels,
+            )
+            return _QueryPointSet(points=qp, labels=labels)
     except Exception as exc:
         logger.warning("Failed to load tip_init.json: %s", exc)
 
@@ -128,6 +396,354 @@ def _load_off_axis_calibration(job: dict) -> dict | None:
         return None
 
 
+def _empty_detection_frames(frame_count: int) -> list[list[Detection]]:
+    return [[] for _ in range(frame_count)]
+
+
+def _best_by_label(detections: list[Detection]) -> dict[str, Detection]:
+    best: dict[str, Detection] = {}
+    for det in detections:
+        previous = best.get(det.label)
+        if previous is None or det.confidence >= previous.confidence:
+            best[det.label] = det
+    return best
+
+
+def _ordered_labels(labels: set[str]) -> list[str]:
+    return sorted(labels, key=lambda label: (_QUERY_LABEL_ORDER.get(label, 99), label))
+
+
+def _distance_limit(frame_shape: tuple[int, int], ratio: float = _MERGE_DISTANCE_RATIO) -> float:
+    height, width = frame_shape
+    return hypot(width, height) * ratio
+
+
+def _distance(a: Detection, b: Detection) -> float:
+    return hypot(a.x - b.x, a.y - b.y)
+
+
+def _blend_detections(primary: Detection, secondary: Detection, primary_weight: float) -> Detection:
+    secondary_weight = max(0.0, 1.0 - primary_weight)
+    total_weight = primary_weight + secondary_weight
+    if total_weight <= 0:
+        return primary
+    x = (primary.x * primary_weight + secondary.x * secondary_weight) / total_weight
+    y = (primary.y * primary_weight + secondary.y * secondary_weight) / total_weight
+    confidence = max(primary.confidence, secondary.confidence)
+    source_parts = [primary.source, secondary.source]
+    source = "+".join(
+        part
+        for idx, part in enumerate(source_parts)
+        if part and part not in source_parts[:idx]
+    )
+    return Detection(
+        x=float(x),
+        y=float(y),
+        confidence=float(confidence),
+        label=primary.label,
+        source=source or primary.source,
+    )
+
+
+def _detections_from_color_analysis(analysis: dict) -> list[Detection]:
+    detections: list[Detection] = []
+    for item in analysis.get("detections", []):
+        detections.append(
+            Detection(
+                x=float(item["x"]),
+                y=float(item["y"]),
+                confidence=float(item.get("confidence", 0.0)),
+                label=str(item["label"]),
+                source="color",
+            )
+        )
+    return detections
+
+
+def _detect_color_frames(
+    frames: list[np.ndarray],
+    on_progress: Callable[[int, int], None] | None = None,
+) -> list[list[Detection]]:
+    detections: list[list[Detection]] = []
+    total = len(frames)
+    for idx, frame in enumerate(frames, start=1):
+        analysis = analyze_tip_frame(frame)
+        detections.append(_detections_from_color_analysis(analysis))
+        if on_progress and (idx == total or idx % 10 == 0):
+            on_progress(idx, total)
+    return detections
+
+
+def _run_backend_stage(
+    model_type: str,
+    frames: list[np.ndarray],
+    query_points: np.ndarray | None,
+    query_labels: list[str] | tuple[str, ...] | None = None,
+    on_progress: Callable[[int, int], None] | None = None,
+    require_query_points: bool = False,
+) -> tuple[list[list[Detection]], str | None]:
+    if not frames:
+        return [], f"No frames for {model_type} detection"
+
+    if require_query_points and (query_points is None or len(query_points) == 0):
+        return _empty_detection_frames(len(frames)), "Tip initialization required for CoTracker; skipping tracker stage"
+
+    info = get_active_model_info(model_type=model_type)
+    if info is None:
+        return _empty_detection_frames(len(frames)), f"No active {model_type} model configured"
+
+    backend = get_backend(model_type)
+    if backend.__class__.__name__ == "PlaceholderBackend":
+        return _empty_detection_frames(len(frames)), f"Active {model_type} model could not be loaded; using empty detections"
+
+    detections = backend.detect(
+        frames,
+        query_points=query_points,
+        query_labels=query_labels,
+        on_progress=on_progress,
+    )
+    return detections, None
+
+
+def _refine_detection_stream(
+    detections: list[list[Detection]],
+    frame_shape: tuple[int, int],
+) -> tuple[list[list[Detection]], dict[str, int]]:
+    labels = _ordered_labels(
+        {
+            det.label
+            for frame_detections in detections
+            for det in frame_detections
+            if det.label
+        }
+    )
+    if not labels:
+        return detections, {"interpolated": 0, "smoothed": 0}
+
+    refined_by_label: dict[str, list[Detection | None]] = {
+        label: [_best_by_label(frame).get(label) for frame in detections]
+        for label in labels
+    }
+    summary = {"interpolated": 0, "smoothed": 0}
+
+    for label in labels:
+        series = refined_by_label[label]
+        interpolated, interpolated_count = _interpolate_short_gaps(series, label, frame_shape)
+        smoothed, smoothed_count = _smooth_detection_series(interpolated)
+        refined_by_label[label] = smoothed
+        summary["interpolated"] += interpolated_count
+        summary["smoothed"] += smoothed_count
+
+    refined_frames: list[list[Detection]] = []
+    for frame_idx in range(len(detections)):
+        frame_detections = [
+            det
+            for label in labels
+            if (det := refined_by_label[label][frame_idx]) is not None
+        ]
+        refined_frames.append(frame_detections)
+
+    return refined_frames, summary
+
+
+def _interpolate_short_gaps(
+    series: list[Detection | None],
+    label: str,
+    frame_shape: tuple[int, int],
+    max_gap: int = _INTERPOLATE_MAX_GAP,
+) -> tuple[list[Detection | None], int]:
+    if max_gap <= 0 or not series:
+        return list(series), 0
+
+    refined = list(series)
+    distance_limit = _distance_limit(frame_shape, _INTERPOLATE_DISTANCE_RATIO)
+    created = 0
+    idx = 0
+    while idx < len(refined):
+        if refined[idx] is not None:
+            idx += 1
+            continue
+        gap_start = idx
+        while idx < len(refined) and refined[idx] is None:
+            idx += 1
+        gap_end = idx
+        gap_len = gap_end - gap_start
+        prev_idx = gap_start - 1
+        next_idx = gap_end
+        if (
+            gap_len == 0
+            or gap_len > max_gap
+            or prev_idx < 0
+            or next_idx >= len(refined)
+            or refined[prev_idx] is None
+            or refined[next_idx] is None
+        ):
+            continue
+
+        prev_det = refined[prev_idx]
+        next_det = refined[next_idx]
+        if prev_det is None or next_det is None:
+            continue
+        travel = hypot(next_det.x - prev_det.x, next_det.y - prev_det.y)
+        if travel > distance_limit * (gap_len + 1):
+            continue
+
+        for step in range(1, gap_len + 1):
+            alpha = step / (gap_len + 1)
+            refined[gap_start + step - 1] = Detection(
+                x=float(prev_det.x + (next_det.x - prev_det.x) * alpha),
+                y=float(prev_det.y + (next_det.y - prev_det.y) * alpha),
+                confidence=float(min(prev_det.confidence, next_det.confidence) * 0.6),
+                label=label,
+                source="interpolated",
+            )
+            created += 1
+
+    return refined, created
+
+
+def _smooth_detection_series(
+    series: list[Detection | None],
+) -> tuple[list[Detection | None], int]:
+    try:
+        from scipy.signal import savgol_filter
+    except Exception:
+        return list(series), 0
+
+    refined = list(series)
+    smoothed = 0
+    start = 0
+    while start < len(refined):
+        while start < len(refined) and refined[start] is None:
+            start += 1
+        if start >= len(refined):
+            break
+        end = start
+        while end < len(refined) and refined[end] is not None:
+            end += 1
+        segment = refined[start:end]
+        segment_len = len(segment)
+        if segment_len >= 5:
+            window = min(_SMOOTH_WINDOW, segment_len if segment_len % 2 == 1 else segment_len - 1)
+            if window >= 5 and window > _SMOOTH_POLYORDER:
+                x_values = np.array([det.x for det in segment], dtype=np.float64)
+                y_values = np.array([det.y for det in segment], dtype=np.float64)
+                smooth_x = savgol_filter(x_values, window_length=window, polyorder=_SMOOTH_POLYORDER, mode="interp")
+                smooth_y = savgol_filter(y_values, window_length=window, polyorder=_SMOOTH_POLYORDER, mode="interp")
+                for offset, det in enumerate(segment):
+                    if det is None:
+                        continue
+                    refined[start + offset] = Detection(
+                        x=float(smooth_x[offset]),
+                        y=float(smooth_y[offset]),
+                        confidence=det.confidence,
+                        label=det.label,
+                        source=det.source,
+                    )
+                smoothed += segment_len
+        start = end
+
+    return refined, smoothed
+
+
+def _merge_frame_detections(
+    tracker_detections: list[Detection],
+    yolo_detections: list[Detection],
+    color_detections: list[Detection],
+    frame_shape: tuple[int, int],
+) -> tuple[list[Detection], _DetectionMergeSummary]:
+    tracker_map = _best_by_label(tracker_detections)
+    yolo_map = _best_by_label(yolo_detections)
+    color_map = _best_by_label(color_detections)
+    labels = _ordered_labels(set(tracker_map) | set(yolo_map) | set(color_map))
+    distance_limit = _distance_limit(frame_shape)
+
+    merged: list[Detection] = []
+    summary = _DetectionMergeSummary()
+
+    for label in labels:
+        tracker_det = tracker_map.get(label)
+        yolo_det = yolo_map.get(label)
+        color_det = color_map.get(label)
+        chosen: Detection | None = None
+
+        if tracker_det is not None:
+            chosen = tracker_det
+            summary = _DetectionMergeSummary(
+                tracker_primary=summary.tracker_primary + 1,
+                yolo_primary=summary.yolo_primary,
+                color_primary=summary.color_primary,
+                missing=summary.missing,
+            )
+            if yolo_det is not None and _distance(tracker_det, yolo_det) <= distance_limit:
+                chosen = _blend_detections(tracker_det, yolo_det, _TRACKER_BLEND_WEIGHT)
+            elif color_det is not None and _distance(tracker_det, color_det) <= distance_limit:
+                chosen = _blend_detections(tracker_det, color_det, _COLOR_BLEND_WEIGHT)
+        elif yolo_det is not None:
+            chosen = yolo_det
+            summary = _DetectionMergeSummary(
+                tracker_primary=summary.tracker_primary,
+                yolo_primary=summary.yolo_primary + 1,
+                color_primary=summary.color_primary,
+                missing=summary.missing,
+            )
+            if color_det is not None and _distance(yolo_det, color_det) <= distance_limit:
+                chosen = _blend_detections(yolo_det, color_det, _YOLO_BLEND_WEIGHT)
+        elif color_det is not None:
+            chosen = color_det
+            summary = _DetectionMergeSummary(
+                tracker_primary=summary.tracker_primary,
+                yolo_primary=summary.yolo_primary,
+                color_primary=summary.color_primary + 1,
+                missing=summary.missing,
+            )
+        else:
+            summary = _DetectionMergeSummary(
+                tracker_primary=summary.tracker_primary,
+                yolo_primary=summary.yolo_primary,
+                color_primary=summary.color_primary,
+                missing=summary.missing + 1,
+            )
+
+        if chosen is not None:
+            merged.append(chosen)
+
+    return merged, summary
+
+
+def _merge_detection_streams(
+    tracker_detections: list[list[Detection]],
+    yolo_detections: list[list[Detection]],
+    color_detections: list[list[Detection]],
+    frame_shape: tuple[int, int],
+) -> tuple[list[list[Detection]], dict[str, int]]:
+    frame_count = max(len(tracker_detections), len(yolo_detections), len(color_detections))
+    merged: list[list[Detection]] = []
+    totals = {"tracker_primary": 0, "yolo_primary": 0, "color_primary": 0, "missing": 0}
+
+    for idx in range(frame_count):
+        tracker_frame = tracker_detections[idx] if idx < len(tracker_detections) else []
+        yolo_frame = yolo_detections[idx] if idx < len(yolo_detections) else []
+        color_frame = color_detections[idx] if idx < len(color_detections) else []
+        merged_frame, summary = _merge_frame_detections(
+            tracker_frame,
+            yolo_frame,
+            color_frame,
+            frame_shape,
+        )
+        merged.append(merged_frame)
+        totals["tracker_primary"] += summary.tracker_primary
+        totals["yolo_primary"] += summary.yolo_primary
+        totals["color_primary"] += summary.color_primary
+        totals["missing"] += summary.missing
+
+    return merged, totals
+
+
+def _has_any_detections(detections: list[list[Detection]]) -> bool:
+    return any(frame for frame in detections)
+
+
 def run_pipeline(job: dict, on_progress: ProgressCallback = None) -> dict[str, Any]:
     """Run the full grading pipeline on a session's SVO2 files.
 
@@ -164,7 +780,8 @@ def run_pipeline(job: dict, on_progress: ProgressCallback = None) -> dict[str, A
     on_calibration = _load_calibration(job, "calibration_path")
     off_calibration = _load_off_axis_calibration(job)
     stereo_calibration = _load_stereo_calibration(job)
-    query_points = _load_query_points(job)
+    on_query_set = _load_query_points(job, "on_axis")
+    off_query_set = _load_query_points(job, "off_axis")
     camera_config = job.get("camera_config")
 
     on_calibration = adjust_calibration(on_calibration, camera_config, "on_axis")
@@ -206,49 +823,123 @@ def run_pipeline(job: dict, on_progress: ProgressCallback = None) -> dict[str, A
     logger.info("  Off-axis: %d frames at %.1f fps", len(off_frames), off_fps)
     _progress("load_off_axis", 1, 1, f"Loaded {len(off_frames)} sampled frames")
 
-    # Stage 2 -- instrument detection via active model backend.
-    _progress("detect_on_axis", 0, max(len(frames), 1), "On-axis camera")
-    logger.info("Stage 2: Running instrument detection on %d frames", len(frames))
-    backend = get_backend()
+    # Stage 2 -- multi-pass 2D detection/tracking.
+    logger.info("Stage 2: Running multi-pass 2D tracking")
 
-    # Run detection on on-axis camera
-    on_detections = backend.detect(
+    _progress("track_on_axis", 0, max(len(frames), 1), "CoTracker on-axis")
+    on_tracker_detections, tracker_warning = _run_backend_stage(
+        "cotracker",
         frames,
-        query_points=query_points,
+        query_points=on_query_set.points if on_query_set else None,
+        query_labels=on_query_set.labels if on_query_set else None,
         on_progress=lambda current, total: _progress(
-            "detect_on_axis",
+            "track_on_axis",
             current,
             total,
-            "On-axis camera",
+            "CoTracker on-axis",
+        ),
+        require_query_points=True,
+    )
+    if tracker_warning:
+        warnings.append(f"On-axis tracker: {tracker_warning}")
+
+    _progress("track_off_axis", 0, max(len(off_frames), 1), "CoTracker off-axis")
+    off_tracker_detections, off_tracker_warning = _run_backend_stage(
+        "cotracker",
+        off_frames,
+        query_points=off_query_set.points if off_query_set else None,
+        query_labels=off_query_set.labels if off_query_set else None,
+        on_progress=lambda current, total: _progress(
+            "track_off_axis",
+            current,
+            total,
+            "CoTracker off-axis",
+        ),
+        require_query_points=True,
+    )
+    if off_tracker_warning:
+        warnings.append(f"Off-axis tracker: {off_tracker_warning}")
+
+    _progress("detect_on_axis_yolo", 0, max(len(frames), 1), "YOLO on-axis")
+    on_yolo_detections, on_yolo_warning = _run_backend_stage(
+        "yolo",
+        frames,
+        query_points=None,
+        on_progress=lambda current, total: _progress(
+            "detect_on_axis_yolo",
+            current,
+            total,
+            "YOLO on-axis",
         ),
     )
-    logger.info("  On-axis detections generated for %d frames", len(on_detections))
-    _progress(
-        "detect_on_axis",
-        len(on_detections),
-        max(len(frames), 1),
-        f"Detected instruments in {len(on_detections)} frames",
+    if on_yolo_warning:
+        warnings.append(f"On-axis YOLO: {on_yolo_warning}")
+
+    _progress("detect_off_axis_yolo", 0, max(len(off_frames), 1), "YOLO off-axis")
+    off_yolo_detections, off_yolo_warning = _run_backend_stage(
+        "yolo",
+        off_frames,
+        query_points=None,
+        on_progress=lambda current, total: _progress(
+            "detect_off_axis_yolo",
+            current,
+            total,
+            "YOLO off-axis",
+        ),
+    )
+    if off_yolo_warning:
+        warnings.append(f"Off-axis YOLO: {off_yolo_warning}")
+
+    _progress("detect_on_axis_color", 0, max(len(frames), 1), "Color fallback on-axis")
+    on_color_detections = _detect_color_frames(
+        frames,
+        on_progress=lambda current, total: _progress(
+            "detect_on_axis_color",
+            current,
+            total,
+            "Color fallback on-axis",
+        ),
+    )
+    _progress("detect_off_axis_color", 0, max(len(off_frames), 1), "Color fallback off-axis")
+    off_color_detections = _detect_color_frames(
+        off_frames,
+        on_progress=lambda current, total: _progress(
+            "detect_off_axis_color",
+            current,
+            total,
+            "Color fallback off-axis",
+        ),
     )
 
-    _progress("detect_off_axis", 0, max(len(off_frames), 1), "Off-axis camera")
-    # Run detection on off-axis camera (with query points if available)
-    off_detections = backend.detect(
-        off_frames,
-        query_points=query_points,
-        on_progress=lambda current, total: _progress(
-            "detect_off_axis",
-            current,
-            total,
-            "Off-axis camera",
-        ),
+    on_detections, on_merge_summary = _merge_detection_streams(
+        on_tracker_detections,
+        on_yolo_detections,
+        on_color_detections,
+        frames[0].shape[:2] if frames else (1, 1),
     )
-    logger.info("  Off-axis detections generated for %d frames", len(off_detections))
-    _progress(
-        "detect_off_axis",
-        len(off_detections),
-        max(len(off_frames), 1),
-        f"Detected instruments in {len(off_detections)} frames",
+    off_detections, off_merge_summary = _merge_detection_streams(
+        off_tracker_detections,
+        off_yolo_detections,
+        off_color_detections,
+        off_frames[0].shape[:2] if off_frames else (1, 1),
     )
+    logger.info("  On-axis merged detections summary: %s", on_merge_summary)
+    logger.info("  Off-axis merged detections summary: %s", off_merge_summary)
+    warnings.append(f"On-axis detection mix: {on_merge_summary}")
+    warnings.append(f"Off-axis detection mix: {off_merge_summary}")
+
+    on_detections, on_refine_summary = _refine_detection_stream(
+        on_detections,
+        frames[0].shape[:2] if frames else (1, 1),
+    )
+    off_detections, off_refine_summary = _refine_detection_stream(
+        off_detections,
+        off_frames[0].shape[:2] if off_frames else (1, 1),
+    )
+    logger.info("  On-axis refined detections summary: %s", on_refine_summary)
+    logger.info("  Off-axis refined detections summary: %s", off_refine_summary)
+    warnings.append(f"On-axis refinement: {on_refine_summary}")
+    warnings.append(f"Off-axis refinement: {off_refine_summary}")
 
     tracking_videos: list[str] = []
     tracking_csvs: list[str] = []
@@ -271,6 +962,60 @@ def run_pipeline(job: dict, on_progress: ProgressCallback = None) -> dict[str, A
                 "off_axis",
             )
         )
+        if _has_any_detections(on_tracker_detections):
+            tracking_csvs.append(
+                write_detection_csv(
+                    on_tracker_detections,
+                    str(results_dir / "tracking_on_axis_cotracker.csv"),
+                    fps,
+                    "on_axis_cotracker",
+                )
+            )
+        if _has_any_detections(off_tracker_detections):
+            tracking_csvs.append(
+                write_detection_csv(
+                    off_tracker_detections,
+                    str(results_dir / "tracking_off_axis_cotracker.csv"),
+                    off_fps,
+                    "off_axis_cotracker",
+                )
+            )
+        if _has_any_detections(on_yolo_detections):
+            tracking_csvs.append(
+                write_detection_csv(
+                    on_yolo_detections,
+                    str(results_dir / "tracking_on_axis_yolo.csv"),
+                    fps,
+                    "on_axis_yolo",
+                )
+            )
+        if _has_any_detections(off_yolo_detections):
+            tracking_csvs.append(
+                write_detection_csv(
+                    off_yolo_detections,
+                    str(results_dir / "tracking_off_axis_yolo.csv"),
+                    off_fps,
+                    "off_axis_yolo",
+                )
+            )
+        if _has_any_detections(on_color_detections):
+            tracking_csvs.append(
+                write_detection_csv(
+                    on_color_detections,
+                    str(results_dir / "tracking_on_axis_color.csv"),
+                    fps,
+                    "on_axis_color",
+                )
+            )
+        if _has_any_detections(off_color_detections):
+            tracking_csvs.append(
+                write_detection_csv(
+                    off_color_detections,
+                    str(results_dir / "tracking_off_axis_color.csv"),
+                    off_fps,
+                    "off_axis_color",
+                )
+            )
     except Exception as exc:
         logger.warning("Failed to write tracking CSVs: %s", exc)
         warnings.append(f"Tracking CSV export failed: {exc}")

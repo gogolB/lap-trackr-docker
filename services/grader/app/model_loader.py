@@ -14,8 +14,10 @@ from app.db import get_active_model_info
 
 logger = logging.getLogger("grader.model_loader")
 
-# Cache: (model_id, backend_instance)
-_cached: tuple[str | None, ModelBackend | None] = (None, None)
+_DEFAULT_CACHE_KEY = "__default__"
+
+# Cache: {cache_key: (model_id, backend_instance)}
+_cached: dict[str, tuple[str | None, ModelBackend | None]] = {}
 
 # Map model_type strings to backend classes
 _BACKEND_CLASSES: dict[str, type[ModelBackend]] = {}
@@ -25,15 +27,11 @@ def _get_backend_class(model_type: str) -> type[ModelBackend]:
     """Lazy-import backend classes to avoid heavy imports at module load."""
     if not _BACKEND_CLASSES:
         from app.backends.cotracker_backend import CoTrackerBackend
-        from app.backends.sam2_backend import SAM2Backend
-        from app.backends.tapir_backend import TAPIRBackend
         from app.backends.yolo_backend import YOLOBackend
 
         _BACKEND_CLASSES.update({
             "yolo": YOLOBackend,
             "cotracker": CoTrackerBackend,
-            "sam2": SAM2Backend,
-            "tapir": TAPIRBackend,
         })
 
     cls = _BACKEND_CLASSES.get(model_type)
@@ -42,34 +40,34 @@ def _get_backend_class(model_type: str) -> type[ModelBackend]:
     return cls
 
 
-def get_backend() -> ModelBackend:
-    """Return the cached backend for the currently active model.
+def get_backend(model_type: str | None = None) -> ModelBackend:
+    """Return the cached backend for the currently active model type.
 
-    If no model is active, falls back to the placeholder backend.
+    If no model is active for the requested type, falls back to the
+    placeholder backend.
     If the active model changed since last call, unloads the old backend
     and loads the new one.
     """
-    global _cached
+    cache_key = model_type or _DEFAULT_CACHE_KEY
 
-    info = get_active_model_info()
+    info = get_active_model_info(model_type=model_type)
 
     if info is None:
-        # No active model in DB — use placeholder
-        cached_id, cached_backend = _cached
+        cached_id, cached_backend = _cached.get(cache_key, (None, None))
         if cached_id is None and cached_backend is not None:
             return cached_backend
 
-        logger.info("No active model found; using placeholder backend")
+        logger.info("No active model found for type=%s; using placeholder backend", model_type)
         backend = PlaceholderBackend()
         backend.load("")
-        _cached = (None, backend)
+        _cached[cache_key] = (None, backend)
         return backend
 
     model_id = str(info["id"])
     model_type = info["model_type"]
     file_path = info["file_path"]
 
-    cached_id, cached_backend = _cached
+    cached_id, cached_backend = _cached.get(cache_key, (None, None))
     if cached_id == model_id and cached_backend is not None:
         return cached_backend
 
@@ -94,7 +92,7 @@ def get_backend() -> ModelBackend:
             logger.warning("Failed to unload partially-initialized backend", exc_info=True)
         placeholder = PlaceholderBackend()
         placeholder.load("")
-        _cached = (None, placeholder)
+        _cached[cache_key] = (None, placeholder)
         return placeholder
-    _cached = (model_id, backend)
+    _cached[cache_key] = (model_id, backend)
     return backend

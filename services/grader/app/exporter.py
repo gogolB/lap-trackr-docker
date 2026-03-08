@@ -12,6 +12,7 @@ import logging
 import subprocess
 import sys
 import zipfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
@@ -19,9 +20,20 @@ import cv2
 import numpy as np
 
 from app.camera_transform import apply_transforms, get_camera_transform, transformed_dimensions
+from app.color_detector import analyze_tip_frame
 
 logger = logging.getLogger("grader.exporter")
 _TARGET_BITRATE = 20_000_000
+_SAMPLE_FRAME_COUNT = 3
+_SAMPLE_CANDIDATE_BUDGET = 60
+_MIN_SAMPLE_FRAME_SCORE = 0.9
+
+
+@dataclass(frozen=True)
+class _SampleCandidate:
+    frame_idx: int
+    score: float
+    detected_tips: int
 
 
 class ExportCancelledError(RuntimeError):
@@ -91,7 +103,8 @@ def export_svo2(
         depth_zip = zipfile.ZipFile(
             npz_path,
             mode="w",
-            compression=zipfile.ZIP_STORED,
+            compression=zipfile.ZIP_DEFLATED,
+            compresslevel=1,
             allowZip64=True,
         )
 
@@ -157,7 +170,8 @@ def export_svo2(
         )
 
         # Extract sample frames from the left-eye video for tip initialization.
-        sample_paths = _extract_sample_frames(str(left_mp4_path), session_dir, cam_name, frame_idx)
+        sample_frames = _extract_sample_frames(str(left_mp4_path), session_dir, cam_name, frame_idx)
+        sample_paths = [entry["path"] for entry in sample_frames]
 
         result = {
             "mp4_path": str(left_mp4_path),
@@ -167,6 +181,7 @@ def export_svo2(
             "npz_path": str(npz_path),
             "frame_count": frame_idx,
             "sample_paths": sample_paths,
+            "sample_frames": sample_frames,
         }
         export_meta = {
             "camera": cam_name,
@@ -178,6 +193,13 @@ def export_svo2(
             "left_eye_source": "right" if transform["swap_eyes"] else "left",
             "right_eye_source": "left" if transform["swap_eyes"] else "right",
             "depth_eye_source": "right" if use_right_depth else "left",
+            "sample_frames": [
+                {
+                    "filename": entry["filename"],
+                    "frame_idx": int(entry["frame_idx"]),
+                }
+                for entry in sample_frames
+            ],
         }
         export_meta_path.write_text(json.dumps(export_meta, indent=2))
         success = True
@@ -217,8 +239,8 @@ def export_svo2(
 
 def _extract_sample_frames(
     mp4_path: str, session_dir: Path, cam_name: str, total_frames: int
-) -> list[str]:
-    """Extract 3 sample frames (first, middle, last) as JPEG from an MP4."""
+) -> list[dict[str, object]]:
+    """Extract informative sample frames for tip initialization."""
     if total_frames < 1:
         return []
 
@@ -228,14 +250,26 @@ def _extract_sample_frames(
         return []
 
     try:
-        # Frame indices: first, middle, last
-        indices = [0]
-        if total_frames > 1:
-            indices.append(total_frames // 2)
-        if total_frames > 2:
-            indices.append(total_frames - 1)
+        candidates: list[_SampleCandidate] = []
+        for frame_idx in _build_candidate_frame_indices(total_frames):
+            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+            ret, bgr = cap.read()
+            if not ret or bgr is None:
+                continue
 
-        sample_paths: list[str] = []
+            analysis = analyze_tip_frame(bgr)
+            candidates.append(
+                _SampleCandidate(
+                    frame_idx=frame_idx,
+                    score=float(analysis["score"]),
+                    detected_tips=int(analysis["colors_found"]),
+                )
+            )
+
+        indices = _select_sample_frame_indices(candidates, total_frames)
+        candidate_scores = {candidate.frame_idx: candidate.score for candidate in candidates}
+
+        sample_entries: list[dict[str, object]] = []
         for i, frame_idx in enumerate(indices):
             cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
             ret, bgr = cap.read()
@@ -244,18 +278,145 @@ def _extract_sample_frames(
             filename = f"{cam_name}_sample_{i}.jpg"
             out_path = session_dir / filename
             cv2.imwrite(str(out_path), bgr, [cv2.IMWRITE_JPEG_QUALITY, 90])
-            sample_paths.append(str(out_path))
+            sample_entries.append(
+                {
+                    "path": str(out_path),
+                    "filename": filename,
+                    "frame_idx": int(frame_idx),
+                    "camera": cam_name,
+                }
+            )
 
-        logger.info("Extracted %d sample frames for %s", len(sample_paths), cam_name)
-        return sample_paths
+        logger.info(
+            "Extracted %d sample frames for %s at frames %s",
+            len(sample_entries),
+            cam_name,
+            [f"{frame_idx} ({candidate_scores.get(frame_idx, 0.0):.2f})" for frame_idx in indices],
+        )
+        return sample_entries
     finally:
         cap.release()
 
 
+def _build_candidate_frame_indices(total_frames: int) -> list[int]:
+    if total_frames <= 0:
+        return []
+
+    if total_frames <= _SAMPLE_CANDIDATE_BUDGET:
+        return list(range(total_frames))
+
+    start_idx = 0 if total_frames < 20 else min(total_frames - 1, int(total_frames * 0.05))
+    end_idx = total_frames - 1 if total_frames < 20 else max(start_idx, int(total_frames * 0.95) - 1)
+    span = end_idx - start_idx
+    if span <= 0:
+        return [start_idx]
+
+    steps = min(_SAMPLE_CANDIDATE_BUDGET, span + 1)
+    return sorted(
+        {
+            int(round(start_idx + span * step / max(steps - 1, 1)))
+            for step in range(steps)
+        }
+    )
+
+
+def _fallback_sample_indices(total_frames: int) -> list[int]:
+    count = min(_SAMPLE_FRAME_COUNT, total_frames)
+    if count <= 0:
+        return []
+    if count == 1:
+        return [total_frames // 2]
+
+    start_idx = 0 if total_frames < 20 else min(total_frames - 1, int(total_frames * 0.1))
+    end_idx = total_frames - 1 if total_frames < 20 else max(start_idx, int(total_frames * 0.9) - 1)
+    span = end_idx - start_idx
+    if span <= 0:
+        return sorted({0, total_frames - 1})[:count]
+
+    return sorted(
+        {
+            int(round(start_idx + span * step / (count - 1)))
+            for step in range(count)
+        }
+    )
+
+
+def _frame_segment(frame_idx: int, total_frames: int, segment_count: int) -> int:
+    if total_frames <= 1 or segment_count <= 1:
+        return 0
+    ratio = frame_idx / max(total_frames - 1, 1)
+    return min(segment_count - 1, int(ratio * segment_count))
+
+
+def _select_sample_frame_indices(candidates: list[_SampleCandidate], total_frames: int) -> list[int]:
+    target_count = min(_SAMPLE_FRAME_COUNT, total_frames)
+    if target_count <= 0:
+        return []
+    if not candidates:
+        return _fallback_sample_indices(total_frames)
+
+    informative = [
+        candidate
+        for candidate in candidates
+        if candidate.detected_tips > 0 and candidate.score >= _MIN_SAMPLE_FRAME_SCORE
+    ]
+
+    selected: list[int] = []
+    used: set[int] = set()
+
+    for segment in range(target_count):
+        segment_candidates = [
+            candidate
+            for candidate in informative
+            if _frame_segment(candidate.frame_idx, total_frames, target_count) == segment
+        ]
+        if not segment_candidates:
+            continue
+        best = max(segment_candidates, key=lambda item: (item.score, item.detected_tips, -item.frame_idx))
+        if best.frame_idx not in used:
+            used.add(best.frame_idx)
+            selected.append(best.frame_idx)
+
+    ranked_pools = [
+        sorted(informative, key=lambda item: (item.score, item.detected_tips), reverse=True),
+        sorted(
+            [candidate for candidate in candidates if candidate.detected_tips > 0],
+            key=lambda item: (item.score, item.detected_tips),
+            reverse=True,
+        ),
+        sorted(candidates, key=lambda item: (item.score, item.detected_tips), reverse=True),
+    ]
+    for pool in ranked_pools:
+        for candidate in pool:
+            if len(selected) >= target_count:
+                break
+            if candidate.frame_idx in used:
+                continue
+            used.add(candidate.frame_idx)
+            selected.append(candidate.frame_idx)
+        if len(selected) >= target_count:
+            break
+
+    if len(selected) < target_count:
+        for frame_idx in _fallback_sample_indices(total_frames):
+            if len(selected) >= target_count:
+                break
+            if frame_idx in used:
+                continue
+            used.add(frame_idx)
+            selected.append(frame_idx)
+
+    return sorted(selected)
+
+
 def _write_depth_frame(depth_zip: zipfile.ZipFile, frame_idx: int, depth_arr: np.ndarray) -> None:
-    """Append one depth frame to the final NPZ archive without compression."""
+    """Append one depth frame to the NPZ archive as float16 for compact storage.
+
+    Float16 gives ~0.1mm precision at typical laparoscopic working distances
+    (0.05-0.5m) and preserves NaN/inf. The grader upcasts back to float32 on read.
+    """
     buffer = io.BytesIO()
-    np.save(buffer, depth_arr, allow_pickle=False)
+    np.save(buffer, depth_arr.astype(np.float16), allow_pickle=False)
     depth_zip.writestr(f"frame_{frame_idx:06d}.npy", buffer.getvalue())
 
 

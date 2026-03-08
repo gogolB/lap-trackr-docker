@@ -17,6 +17,7 @@ from app.config import CAMERA_CX, CAMERA_CY, CAMERA_FX, CAMERA_FY, DEFAULT_FPS
 from app.backends.base import Detection
 
 logger = logging.getLogger("grader.pose_estimator")
+_POSE_META_KEYS = {"frame_idx", "timestamp"}
 
 
 def _pixel_to_3d(
@@ -103,9 +104,9 @@ def estimate_poses(
     Returns
     -------
     list[dict]
-        Each dict has keys ``frame_idx``, ``timestamp``, ``left_tip`` and
-        ``right_tip`` (each a ``[x, y, z]`` list in metres).  Frames where
-        depth lookup fails for a tip will have ``None`` for that tip.
+        Each dict has keys ``frame_idx``, ``timestamp``, and one key per
+        detected instrument-tip label. Frames where depth lookup fails for a
+        tip will have ``None`` for that label.
     """
 
     if fps is None or fps <= 0:
@@ -144,14 +145,25 @@ def estimate_poses(
         logger.info("No extrinsic transform, poses will be in camera frame")
 
     poses: list[dict[str, Any]] = []
+    tip_labels = sorted(
+        {
+            det.label
+            for frame_dets in detections
+            for det in frame_dets
+            if det.label
+        }
+    )
 
     for frame_idx, (frame_dets, depth_map) in enumerate(
         zip(detections, depth_maps)
     ):
         timestamp = frame_idx / fps
-
-        left_tip: list[float] | None = None
-        right_tip: list[float] | None = None
+        pose: dict[str, Any] = {
+            "frame_idx": frame_idx,
+            "timestamp": round(timestamp, 6),
+        }
+        for label in tip_labels:
+            pose[label] = None
 
         for det in frame_dets:
             depth = _lookup_depth(depth_map, det.x, det.y)
@@ -171,27 +183,19 @@ def estimate_poses(
             if extrinsic:
                 point = _transform_point(point, extrinsic)
 
-            if det.label == "left_tip":
-                left_tip = point
-            elif det.label == "right_tip":
-                right_tip = point
+            if det.label:
+                pose[det.label] = point
 
-        poses.append(
-            {
-                "frame_idx": frame_idx,
-                "timestamp": round(timestamp, 6),
-                "left_tip": left_tip,
-                "right_tip": right_tip,
-            }
-        )
+        poses.append(pose)
 
-    valid = sum(
-        1 for p in poses if p["left_tip"] is not None and p["right_tip"] is not None
-    )
+    valid_counts = {
+        label: sum(1 for pose in poses if pose.get(label) is not None)
+        for label in tip_labels
+    }
     logger.info(
-        "Estimated 3D poses for %d frames (%d with both tips valid)",
+        "Estimated 3D poses for %d frames with valid labels %s",
         len(poses),
-        valid,
+        valid_counts,
     )
     return poses
 
