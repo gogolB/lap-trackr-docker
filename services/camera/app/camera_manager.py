@@ -372,14 +372,17 @@ class CameraManager:
         if self.recording:
             with lock:
                 cam.retrieve_image(image, view)
-                data = image.get_data()
+                # Detach from the ZED SDK buffer before releasing the lock.
+                # Otherwise the next grab/retrieve can mutate the same memory
+                # while we are still rotating or JPEG-encoding it.
+                data = image.get_data().copy()
         else:
             with lock:
                 runtime = sl.RuntimeParameters()
                 if cam.grab(runtime) != sl.ERROR_CODE.SUCCESS:
                     return None
                 cam.retrieve_image(image, view)
-                data = image.get_data()
+                data = image.get_data().copy()
 
         if data is None:
             return None
@@ -452,14 +455,14 @@ class CameraManager:
         if self.recording:
             with lock:
                 cam.retrieve_image(image, view)
-                data = image.get_data()
+                data = image.get_data().copy()
         else:
             with lock:
                 runtime = sl.RuntimeParameters()
                 if cam.grab(runtime) != sl.ERROR_CODE.SUCCESS:
                     return None, None
                 cam.retrieve_image(image, view)
-                data = image.get_data()
+                data = image.get_data().copy()
 
         if data is None:
             return None, None
