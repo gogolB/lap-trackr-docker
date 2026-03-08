@@ -32,6 +32,7 @@ if [[ $# -lt 1 ]] || [[ "$1" == "-h" ]] || [[ "$1" == "--help" ]]; then
     echo "  --sam2-model PATH              Override SAM2 checkpoint path"
     echo "  --sam3-model PATH              Override SAM3 checkpoint path"
     echo "  --cotracker-model PATH         Override CoTracker checkpoint path"
+    echo "  --debug                        Render per-stage debug videos (masks, tracks)"
     echo ""
     echo "Examples:"
     echo "  $0 data/sessions/2025-01-15_10-30-00"

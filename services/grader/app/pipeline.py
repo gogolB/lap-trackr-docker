@@ -1254,6 +1254,27 @@ def run_v2_pipeline(job: dict, on_progress: ProgressCallback = None) -> dict[str
     timings[pass1_key] = time.monotonic() - t0
     logger.info("Pass 1 timing: %.1fs", timings[pass1_key])
 
+    # Debug: render segmentation overlay videos
+    if os.environ.get("_DEBUG_RENDER"):
+        try:
+            from app.debug_renderer import render_segmentation_video
+            _progress("debug_render", 0, 2, "Rendering segmentation debug videos")
+            if data.on_masks and frames:
+                render_segmentation_video(
+                    frames, data.on_masks,
+                    str(results_dir / "debug_segmentation_on_axis.mp4"), fps,
+                    camera_name="on_axis",
+                )
+            if data.off_masks and off_frames:
+                render_segmentation_video(
+                    off_frames, data.off_masks,
+                    str(results_dir / "debug_segmentation_off_axis.mp4"), fps,
+                    camera_name="off_axis",
+                )
+            _progress("debug_render", 2, 2, "Segmentation debug videos complete")
+        except Exception as exc:
+            logger.warning("Debug segmentation render failed: %s", exc, exc_info=True)
+
     # Pass 2: CoTracker point refinement
     t0 = time.monotonic()
     try:
@@ -1263,6 +1284,27 @@ def run_v2_pipeline(job: dict, on_progress: ProgressCallback = None) -> dict[str
         warnings.append(f"Pass 2 (CoTracker) failed: {exc}")
     timings["pass2_cotracker"] = time.monotonic() - t0
     logger.info("Pass 2 timing: %.1fs", timings["pass2_cotracker"])
+
+    # Debug: render CoTracker overlay videos
+    if os.environ.get("_DEBUG_RENDER"):
+        try:
+            from app.debug_renderer import render_cotracker_video
+            _progress("debug_render", 0, 2, "Rendering CoTracker debug videos")
+            if data.on_tracks and frames:
+                render_cotracker_video(
+                    frames, data.on_tracks, data.on_visibility, data.on_masks,
+                    str(results_dir / "debug_cotracker_on_axis.mp4"), fps,
+                    camera_name="on_axis",
+                )
+            if data.off_tracks and off_frames:
+                render_cotracker_video(
+                    off_frames, data.off_tracks, data.off_visibility, data.off_masks,
+                    str(results_dir / "debug_cotracker_off_axis.mp4"), fps,
+                    camera_name="off_axis",
+                )
+            _progress("debug_render", 2, 2, "CoTracker debug videos complete")
+        except Exception as exc:
+            logger.warning("Debug CoTracker render failed: %s", exc, exc_info=True)
 
     # Pass 3: Adaptive color gap filling (CPU)
     t0 = time.monotonic()

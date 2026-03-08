@@ -146,7 +146,10 @@ pip install \
     "opencv-python-headless>=4.10,<5.0" \
     "sqlalchemy>=2.0,<3.0" \
     "psycopg2-binary>=2.9,<3.0" \
-    "rich>=13.0"
+    "rich>=13.0" \
+    "einops" \
+    "decord" \
+    "pycocotools"
 
 # ---------------------------------------------------------------------------
 # Install SAM2, SAM3, and CoTracker

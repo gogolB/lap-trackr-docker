@@ -249,6 +249,11 @@ def main() -> None:
         default=None,
         help="Path to CoTracker checkpoint (.pth). If omitted, Pass 2 is skipped.",
     )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Render debug videos for each pipeline stage (segmentation masks, CoTracker points).",
+    )
     args = parser.parse_args()
 
     session_dir: Path = args.session_dir.resolve()
@@ -292,6 +297,8 @@ def main() -> None:
         os.environ["SAM3_MODEL_PATH"] = str(Path(args.sam3_model).resolve())
     if args.cotracker_model:
         os.environ["_COTRACKER_MODEL_PATH"] = str(Path(args.cotracker_model).resolve())
+    if args.debug:
+        os.environ["_DEBUG_RENDER"] = "1"
 
     # Display session info
     console.print()
@@ -302,6 +309,8 @@ def main() -> None:
     info_table.add_row("Device", f"[cyan]{device}[/]")
     info_table.add_row("Segmentation", f"[cyan]{seg_backend.upper()}[/]")
     info_table.add_row("Sampling", f"every {args.sample_interval} frame(s)")
+    if args.debug:
+        info_table.add_row("Debug", "[yellow]ON — rendering per-stage debug videos[/]")
     if args.sam2_model:
         info_table.add_row("SAM2 Model", args.sam2_model)
     if args.sam3_model:
