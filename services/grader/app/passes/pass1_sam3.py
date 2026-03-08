@@ -294,7 +294,7 @@ def run(
         logger.info("Tip init points: %s", {k: (v[0], v[1]) for k, v in tip_points.items()})
 
     try:
-        from sam3.model_builder import build_sam3_video_predictor
+        from sam3.model_builder import build_sam3_video_model, build_sam3_video_predictor
     except ImportError:
         logger.error("sam3 package not installed, skipping Pass 1")
         logger.error("Install with: pip install git+https://github.com/facebookresearch/sam3.git")
@@ -308,14 +308,6 @@ def run(
         device = "cuda" if torch.cuda.is_available() else "cpu"
     logger.info("SAM3 using device: %s", device)
 
-    # Determine GPU list for SAM3
-    if device == "cuda":
-        gpus_to_use = [torch.cuda.current_device()]
-    else:
-        gpus_to_use = []
-
-    predictor = build_sam3_video_predictor(gpus_to_use=gpus_to_use)
-
     # Total steps = (forward + backward) for on-axis + (forward + backward) for off-axis
     on_steps = len(data.on_frames) * 2
     off_steps = len(data.off_frames) * 2
@@ -323,7 +315,10 @@ def run(
 
     try:
         if use_text_prompts:
-            # Text prompt path (handle_request API)
+            # Text prompt path — uses handle_request API via Sam3VideoPredictorMultiGPU
+            gpus_to_use = [torch.cuda.current_device()] if device == "cuda" else []
+            predictor = build_sam3_video_predictor(gpus_to_use=gpus_to_use)
+
             logger.info("Segmenting on-axis view with text prompts (%d frames)", len(data.on_frames))
             data.on_masks = _segment_view_text(
                 predictor,
@@ -341,8 +336,17 @@ def run(
                 total_steps=total_steps,
                 on_progress=lambda c, t: on_progress("pass1_sam3", c, t, "SAM3 text off-axis") if on_progress else None,
             )
+
+            del predictor
         else:
-            # Point prompt path (SAM2-compatible API)
+            # Point prompt path — uses SAM2-compatible tracker API
+            # build_sam3_video_model returns a model with .tracker (Sam3TrackerPredictor)
+            # which has init_state / add_new_points / propagate_in_video
+            logger.info("Building SAM3 tracker (SAM2-compatible mode)")
+            sam3_model = build_sam3_video_model()
+            predictor = sam3_model.tracker
+            predictor.backbone = sam3_model.detector.backbone
+
             # On-axis
             logger.info("Segmenting on-axis view (%d frames)", len(data.on_frames))
             on_frame_dir = _frames_to_jpeg_dir(data.on_frames)
@@ -375,8 +379,10 @@ def run(
                 shutil.rmtree(off_frame_dir, ignore_errors=True)
             logger.info("Off-axis masks: %s", {k: sum(1 for m in v if m is not None) for k, v in data.off_masks.items()})
 
+            del predictor
+            del sam3_model
+
     finally:
-        del predictor
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         logger.info("SAM3 model unloaded, GPU memory freed")
