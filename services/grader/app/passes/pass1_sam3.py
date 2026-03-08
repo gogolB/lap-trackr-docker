@@ -73,31 +73,38 @@ def _segment_view_points(
         on_progress(base_offset, total_steps)
 
     # Add point prompts for each instrument (relative coords)
+    points_added = 0
     for label, (x, y, frame_idx) in tip_points.items():
         obj_id = _LABEL_OBJ_IDS.get(label)
         if obj_id is None:
             continue
 
         rel_points = torch.tensor([[x / w, y / h]], dtype=torch.float32)
-        labels = torch.tensor([1], dtype=torch.int32)  # 1 = positive click
+        point_labels = torch.tensor([1], dtype=torch.int32)  # 1 = positive click
 
-        predictor.add_new_points(
+        _, out_obj_ids, out_low_res, out_video_res = predictor.add_new_points_or_box(
             inference_state=inference_state,
             frame_idx=frame_idx,
             obj_id=obj_id,
             points=rel_points,
-            labels=labels,
-            clear_old_points=False,
+            labels=point_labels,
         )
+        points_added += 1
         logger.info(
-            "Added point prompt for %s: (%.1f, %.1f) -> rel (%.4f, %.4f) at frame %d",
-            label, x, y, x / w, y / h, frame_idx,
+            "Added point prompt for %s (obj_id=%d): (%.1f, %.1f) -> rel (%.4f, %.4f) at frame %d "
+            "(returned %d objects)",
+            label, obj_id, x, y, x / w, y / h, frame_idx, len(out_obj_ids),
         )
+
+    if points_added == 0:
+        logger.warning("No point prompts were added — tip_points may be empty or have unknown labels")
+        return {label: [None] * n_frames for label in tip_points}
 
     # Forward propagation
     forward_results: dict[int, dict[int, np.ndarray]] = {}
     for frame_idx, obj_ids, low_res_masks, video_res_masks, obj_scores in predictor.propagate_in_video(
-        inference_state, start_frame_idx=0, max_frame_num_to_track=n_frames, reverse=False,
+        inference_state, start_frame_idx=0, max_frame_num_to_track=n_frames,
+        reverse=False, propagate_preflight=True,
     ):
         frame_masks = {}
         for i, oid in enumerate(obj_ids):
@@ -110,7 +117,8 @@ def _segment_view_points(
     # Backward propagation
     backward_results: dict[int, dict[int, np.ndarray]] = {}
     for frame_idx, obj_ids, low_res_masks, video_res_masks, obj_scores in predictor.propagate_in_video(
-        inference_state, start_frame_idx=0, max_frame_num_to_track=n_frames, reverse=True,
+        inference_state, start_frame_idx=0, max_frame_num_to_track=n_frames,
+        reverse=True,
     ):
         frame_masks = {}
         for i, oid in enumerate(obj_ids):
