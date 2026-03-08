@@ -11,8 +11,9 @@ import traceback
 
 import redis
 
+from app.camera_transform import load_camera_config_from_session_dir
 from app.config import REDIS_URL
-from app.db import save_error, save_results, update_session_status
+from app.db import get_camera_config, save_error, save_results, update_session_status
 from app.pipeline import run_pipeline
 
 logging.basicConfig(
@@ -80,6 +81,19 @@ def _publish_progress(
 _shutdown = False
 
 
+def _resolve_camera_config(job: dict) -> dict | None:
+    from pathlib import Path
+
+    if isinstance(job.get("camera_config"), dict):
+        return job["camera_config"]
+    path = job.get("on_axis_path") or job.get("off_axis_path")
+    if path:
+        config = load_camera_config_from_session_dir(Path(path).parent)
+        if config is not None:
+            return config
+    return get_camera_config()
+
+
 def _handle_signal(signum, frame):
     global _shutdown
     _shutdown = True
@@ -120,6 +134,7 @@ def main() -> None:
         try:
             update_session_status(session_id, "grading")
             logger.info("Session %s: status -> grading", session_id)
+            job["camera_config"] = _resolve_camera_config(job)
 
             def on_progress(stage: str, current: int, total: int, detail: str = "") -> None:
                 _publish_progress(redis_client, session_id, stage, current, total, detail)

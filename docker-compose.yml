@@ -129,10 +129,6 @@ services:
     restart: unless-stopped
     runtime: nvidia
     devices:
-      - /dev/video0:/dev/video0
-      - /dev/video1:/dev/video1
-      - /dev/video2:/dev/video2
-      - /dev/video3:/dev/video3
       - /dev/nvhost-msenc:/dev/nvhost-msenc
       - /dev/nvhost-nvdec:/dev/nvhost-nvdec
     environment:

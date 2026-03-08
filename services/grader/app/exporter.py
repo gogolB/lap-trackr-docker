@@ -7,6 +7,7 @@ offline playback and analysis on machines without the ZED SDK.
 from __future__ import annotations
 
 import io
+import json
 import logging
 import subprocess
 import sys
@@ -16,6 +17,8 @@ from typing import Callable
 
 import cv2
 import numpy as np
+
+from app.camera_transform import apply_transforms, get_camera_transform, transformed_dimensions
 
 logger = logging.getLogger("grader.exporter")
 _TARGET_BITRATE = 20_000_000
@@ -29,6 +32,7 @@ def export_svo2(
     svo2_path: str,
     on_progress: Callable[[int, int], None] | None = None,
     should_cancel: Callable[[], bool] | None = None,
+    camera_config: dict | None = None,
 ) -> dict:
     """Export a single SVO2 file to MP4 (left/right eyes) + NPZ (depth).
 
@@ -47,10 +51,12 @@ def export_svo2(
     path = Path(svo2_path)
     session_dir = path.parent
     cam_name = path.stem  # "on_axis" or "off_axis"
+    transform = get_camera_transform(camera_config, cam_name)
 
     left_mp4_path = session_dir / f"{cam_name}_left.mp4"
     right_mp4_path = session_dir / f"{cam_name}_right.mp4"
     npz_path = session_dir / f"{cam_name}_depth.npz"
+    export_meta_path = session_dir / f"{cam_name}_export.json"
 
     zed = sl.Camera()
     init = sl.InitParameters()
@@ -78,9 +84,10 @@ def export_svo2(
         fps = int(info.camera_configuration.fps)
         if fps <= 0:
             fps = 30
+        out_w, out_h = transformed_dimensions(w, h, transform)
 
-        left_writer = _create_writer(left_mp4_path, fps, w, h)
-        right_writer = _create_writer(right_mp4_path, fps, w, h)
+        left_writer = _create_writer(left_mp4_path, fps, out_w, out_h)
+        right_writer = _create_writer(right_mp4_path, fps, out_w, out_h)
         depth_zip = zipfile.ZipFile(
             npz_path,
             mode="w",
@@ -95,21 +102,33 @@ def export_svo2(
         frame_idx = 0
 
         runtime = sl.RuntimeParameters()
+        left_view = sl.VIEW.RIGHT if transform["swap_eyes"] else sl.VIEW.LEFT
+        right_view = sl.VIEW.LEFT if transform["swap_eyes"] else sl.VIEW.RIGHT
+        use_right_depth = bool(transform["swap_eyes"]) and hasattr(sl.MEASURE, "DEPTH_RIGHT")
+        depth_measure = sl.MEASURE.DEPTH_RIGHT if use_right_depth else sl.MEASURE.DEPTH
+        if transform["swap_eyes"] and not use_right_depth:
+            logger.warning(
+                "swap_eyes enabled for %s but DEPTH_RIGHT is unavailable; using left-eye depth",
+                cam_name,
+            )
 
         while zed.grab(runtime) == sl.ERROR_CODE.SUCCESS:
             if should_cancel and should_cancel():
                 raise ExportCancelledError(f"Export cancelled for session file '{svo2_path}'")
 
-            zed.retrieve_image(left_image, sl.VIEW.LEFT)
-            zed.retrieve_image(right_image, sl.VIEW.RIGHT)
-            zed.retrieve_measure(depth, sl.MEASURE.DEPTH)
+            zed.retrieve_image(left_image, left_view)
+            zed.retrieve_image(right_image, right_view)
+            zed.retrieve_measure(depth, depth_measure)
 
-            left_bgr = left_image.get_data()[:, :, :3].copy()
-            right_bgr = right_image.get_data()[:, :, :3].copy()
+            left_bgr = apply_transforms(left_image.get_data()[:, :, :3].copy(), transform)
+            right_bgr = apply_transforms(right_image.get_data()[:, :, :3].copy(), transform)
             left_writer.write(left_bgr)
             right_writer.write(right_bgr)
 
-            depth_arr = depth.get_data().copy().astype(np.float32)
+            depth_arr = apply_transforms(
+                depth.get_data().copy().astype(np.float32),
+                transform,
+            )
             _write_depth_frame(depth_zip, frame_idx, depth_arr)
             frame_idx += 1
 
@@ -149,6 +168,18 @@ def export_svo2(
             "frame_count": frame_idx,
             "sample_paths": sample_paths,
         }
+        export_meta = {
+            "camera": cam_name,
+            "transforms_applied": True,
+            "swap_eyes_applied": bool(transform["swap_eyes"]),
+            "rotation": int(transform["rotation"]),
+            "flip_h": bool(transform["flip_h"]),
+            "flip_v": bool(transform["flip_v"]),
+            "left_eye_source": "right" if transform["swap_eyes"] else "left",
+            "right_eye_source": "left" if transform["swap_eyes"] else "right",
+            "depth_eye_source": "right" if use_right_depth else "left",
+        }
+        export_meta_path.write_text(json.dumps(export_meta, indent=2))
         success = True
         return result
     finally:
@@ -179,6 +210,7 @@ def export_svo2(
             _safe_unlink(left_mp4_path)
             _safe_unlink(right_mp4_path)
             _safe_unlink(npz_path)
+            _safe_unlink(export_meta_path)
         if release_errors and sys.exc_info()[0] is None:
             raise RuntimeError("Failed to finalize export writers: " + "; ".join(release_errors))
 

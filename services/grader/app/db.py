@@ -20,6 +20,7 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    Integer,
     MetaData,
     String,
     Table,
@@ -110,6 +111,23 @@ grading_results_table = Table(
     Column("warnings", JSONB, nullable=True),
 )
 
+camera_config_table = Table(
+    "camera_config",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("on_axis_serial", String(32), nullable=True),
+    Column("off_axis_serial", String(32), nullable=True),
+    Column("on_axis_swap_eyes", Boolean, nullable=False),
+    Column("off_axis_swap_eyes", Boolean, nullable=False),
+    Column("on_axis_rotation", Integer, nullable=False),
+    Column("off_axis_rotation", Integer, nullable=False),
+    Column("on_axis_flip_h", Boolean, nullable=False),
+    Column("on_axis_flip_v", Boolean, nullable=False),
+    Column("off_axis_flip_h", Boolean, nullable=False),
+    Column("off_axis_flip_v", Boolean, nullable=False),
+    Column("updated_at", DateTime(timezone=True), nullable=True),
+)
+
 
 # ---------------------------------------------------------------------------
 # Public helpers
@@ -157,6 +175,31 @@ def update_session_status(session_id: str, status: str) -> None:
             .values(status=status)
         )
     logger.info("Session %s: status -> %s", session_id, status)
+
+
+def get_camera_config() -> dict[str, Any] | None:
+    """Return the single persisted camera-config row, if present."""
+    engine = _get_engine()
+    with engine.begin() as conn:
+        row = conn.execute(
+            camera_config_table.select().where(camera_config_table.c.id == 1)
+        ).first()
+
+    if row is None:
+        return None
+
+    return {
+        "on_axis_serial": row.on_axis_serial,
+        "off_axis_serial": row.off_axis_serial,
+        "on_axis_swap_eyes": bool(row.on_axis_swap_eyes),
+        "off_axis_swap_eyes": bool(row.off_axis_swap_eyes),
+        "on_axis_rotation": int(row.on_axis_rotation),
+        "off_axis_rotation": int(row.off_axis_rotation),
+        "on_axis_flip_h": bool(row.on_axis_flip_h),
+        "on_axis_flip_v": bool(row.on_axis_flip_v),
+        "off_axis_flip_h": bool(row.off_axis_flip_h),
+        "off_axis_flip_v": bool(row.off_axis_flip_v),
+    }
 
 
 def save_results(session_id: str, results: dict[str, Any]) -> None:

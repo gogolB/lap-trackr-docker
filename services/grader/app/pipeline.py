@@ -9,6 +9,7 @@ from typing import Any, Callable, Optional
 
 import numpy as np
 
+from app.camera_transform import adjust_calibration
 from app.metrics import calculate_metrics
 from app.model_loader import get_backend
 from app.pose_estimator import estimate_poses, estimate_poses_dual
@@ -164,6 +165,10 @@ def run_pipeline(job: dict, on_progress: ProgressCallback = None) -> dict[str, A
     off_calibration = _load_off_axis_calibration(job)
     stereo_calibration = _load_stereo_calibration(job)
     query_points = _load_query_points(job)
+    camera_config = job.get("camera_config")
+
+    on_calibration = adjust_calibration(on_calibration, camera_config, "on_axis")
+    off_calibration = adjust_calibration(off_calibration, camera_config, "off_axis")
 
     # Stage 1 -- load SVO2 files and extract frames + depth maps.
     _progress("load_on_axis", 0, 1, "Opening on-axis recording")
@@ -176,6 +181,7 @@ def run_pipeline(job: dict, on_progress: ProgressCallback = None) -> dict[str, A
             total,
             "Loading on-axis frames",
         ),
+        camera_config=camera_config,
     )
     logger.info(
         "  Loaded %d frames (%d depth maps) at %.1f fps",
@@ -195,6 +201,7 @@ def run_pipeline(job: dict, on_progress: ProgressCallback = None) -> dict[str, A
             total,
             "Loading off-axis frames",
         ),
+        camera_config=camera_config,
     )
     logger.info("  Off-axis: %d frames at %.1f fps", len(off_frames), off_fps)
     _progress("load_off_axis", 1, 1, f"Loaded {len(off_frames)} sampled frames")

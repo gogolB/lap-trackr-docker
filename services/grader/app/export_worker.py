@@ -14,8 +14,9 @@ from pathlib import Path
 
 import redis
 
+from app.camera_transform import load_camera_config_from_session_dir
 from app.config import REDIS_URL
-from app.db import update_session_status
+from app.db import get_camera_config, update_session_status
 
 logging.basicConfig(
     level=logging.INFO,
@@ -33,6 +34,17 @@ PROGRESS_TTL = 3600  # 1 hour
 
 _shutdown = False
 _progress_lock = threading.Lock()
+
+
+def _resolve_camera_config(job: dict) -> dict | None:
+    if isinstance(job.get("camera_config"), dict):
+        return job["camera_config"]
+    path = job.get("on_axis_path") or job.get("off_axis_path")
+    if path:
+        config = load_camera_config_from_session_dir(Path(path).parent)
+        if config is not None:
+            return config
+    return get_camera_config()
 
 
 def _publish_progress(
@@ -128,6 +140,7 @@ def main() -> None:
             from app.color_detector import detect_tips
 
             update_session_status(session_id, "exporting")
+            camera_config = _resolve_camera_config(job)
             all_sample_paths: list[str] = []
             session_dir: str | None = None
             cancel_key = f"{EXPORT_CANCEL_KEY_PREFIX}{session_id}"
@@ -171,6 +184,7 @@ def main() -> None:
                     svo_path,
                     on_progress=on_export_progress,
                     should_cancel=_should_cancel,
+                    camera_config=camera_config,
                 )
                 _publish_progress(
                     redis_client,

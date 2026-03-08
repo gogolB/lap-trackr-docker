@@ -6,11 +6,14 @@ sampling every Nth frame to keep processing tractable.
 
 from __future__ import annotations
 
+import json
 import logging
+from pathlib import Path
 from typing import Callable, List, Tuple
 
 import numpy as np
 
+from app.camera_transform import apply_transforms, get_camera_transform
 from app.config import DEFAULT_FPS, FRAME_SAMPLE_INTERVAL
 
 logger = logging.getLogger("grader.svo_loader")
@@ -20,6 +23,7 @@ def load_svo2(
     svo_path: str,
     sample_interval: int | None = None,
     on_progress: Callable[[int, int], None] | None = None,
+    camera_config: dict | None = None,
 ) -> Tuple[List[np.ndarray], List[np.ndarray], float]:
     """Open an SVO2 file and return sampled frames, depth maps, and FPS.
 
@@ -43,6 +47,19 @@ def load_svo2(
 
     if sample_interval is None:
         sample_interval = FRAME_SAMPLE_INTERVAL
+    cam_name = Path(svo_path).stem
+    transform = get_camera_transform(camera_config, cam_name)
+
+    # Prefer exported files when available so grading uses the same transformed
+    # frames/depth that the user sees in tip init and playback artifacts.
+    export_result = _try_load_from_exports(
+        svo_path,
+        sample_interval,
+        on_progress=on_progress,
+        camera_config=camera_config,
+    )
+    if export_result is not None:
+        return export_result
 
     try:
         import pyzed.sl as sl
@@ -51,15 +68,6 @@ def load_svo2(
         logger.info("ZED SDK (pyzed) not available, trying exported files")
 
     if sl is None:
-        # Try loading from exported MP4 + NPZ
-        export_result = _try_load_from_exports(
-            svo_path,
-            sample_interval,
-            on_progress=on_progress,
-        )
-        if export_result is not None:
-            return export_result
-
         logger.warning(
             "No ZED SDK and no exported files -- returning synthetic data "
             "for development/testing."
@@ -94,6 +102,14 @@ def load_svo2(
     frames: list[np.ndarray] = []
     depth_maps: list[np.ndarray] = []
     frame_idx = 0
+    view = sl.VIEW.RIGHT if transform["swap_eyes"] else sl.VIEW.LEFT
+    use_right_depth = bool(transform["swap_eyes"]) and hasattr(sl.MEASURE, "DEPTH_RIGHT")
+    depth_measure = sl.MEASURE.DEPTH_RIGHT if use_right_depth else sl.MEASURE.DEPTH
+    if transform["swap_eyes"] and not use_right_depth:
+        logger.warning(
+            "swap_eyes enabled for %s but DEPTH_RIGHT is unavailable; using left-eye depth",
+            cam_name,
+        )
 
     while True:
         err = camera.grab(runtime)
@@ -101,12 +117,14 @@ def load_svo2(
             break
 
         if frame_idx % sample_interval == 0:
-            camera.retrieve_image(image_mat, sl.VIEW.LEFT)
-            camera.retrieve_measure(depth_mat, sl.MEASURE.DEPTH)
+            camera.retrieve_image(image_mat, view)
+            camera.retrieve_measure(depth_mat, depth_measure)
 
             # .get_data() returns a numpy view; copy to own the memory.
-            frames.append(np.array(image_mat.get_data()[:, :, :3], dtype=np.uint8))
-            depth_maps.append(np.array(depth_mat.get_data(), dtype=np.float32))
+            frame = np.array(image_mat.get_data()[:, :, :3], dtype=np.uint8)
+            depth = np.array(depth_mat.get_data(), dtype=np.float32)
+            frames.append(apply_transforms(frame, transform))
+            depth_maps.append(apply_transforms(depth, transform))
 
         current = frame_idx + 1
         if on_progress and (current % 10 == 0 or current == total_frames):
@@ -135,6 +153,7 @@ def _try_load_from_exports(
     svo_path: str,
     sample_interval: int,
     on_progress: Callable[[int, int], None] | None = None,
+    camera_config: dict | None = None,
 ) -> Tuple[List[np.ndarray], List[np.ndarray], float] | None:
     """Try to load frames and depth from exported MP4 + NPZ files.
 
@@ -145,7 +164,27 @@ def _try_load_from_exports(
 
     session_dir = Path(svo_path).parent
     cam_name = Path(svo_path).stem  # "on_axis" or "off_axis"
-    mp4_path = session_dir / f"{cam_name}_left.mp4"
+    transform = get_camera_transform(camera_config, cam_name)
+    export_meta_path = session_dir / f"{cam_name}_export.json"
+    export_meta: dict | None = None
+    if export_meta_path.exists():
+        try:
+            export_meta = json.loads(export_meta_path.read_text())
+        except Exception:
+            logger.warning("Failed to parse export metadata %s", export_meta_path, exc_info=True)
+
+    exports_transformed = bool(export_meta and export_meta.get("transforms_applied"))
+    if exports_transformed:
+        mp4_path = session_dir / f"{cam_name}_left.mp4"
+    else:
+        logical_eye = "right" if transform["swap_eyes"] else "left"
+        mp4_path = session_dir / f"{cam_name}_{logical_eye}.mp4"
+        if transform["swap_eyes"]:
+            logger.warning(
+                "Loading pre-transform exports for %s with swap_eyes enabled; "
+                "video can use the right-eye MP4 but depth remains left-eye until re-exported",
+                cam_name,
+            )
     npz_path = session_dir / f"{cam_name}_depth.npz"
 
     if not mp4_path.exists() or not npz_path.exists():
@@ -182,16 +221,23 @@ def _try_load_from_exports(
                 break
 
             if frame_idx % sample_interval == 0:
-                frames.append(bgr.copy())
+                frame = bgr.copy()
                 key = f"frame_{frame_idx:06d}"
                 if key in depth_data:
-                    depth_maps.append(depth_data[key].astype(np.float32))
+                    depth = depth_data[key].astype(np.float32)
                 elif frame_idx < len(depth_keys):
-                    depth_maps.append(depth_data[depth_keys[frame_idx]].astype(np.float32))
+                    depth = depth_data[depth_keys[frame_idx]].astype(np.float32)
                 else:
                     # No depth for this frame, use zeros
                     h, w = bgr.shape[:2]
-                    depth_maps.append(np.zeros((h, w), dtype=np.float32))
+                    depth = np.zeros((h, w), dtype=np.float32)
+
+                if not exports_transformed:
+                    frame = apply_transforms(frame, transform)
+                    depth = apply_transforms(depth, transform)
+
+                frames.append(frame)
+                depth_maps.append(depth)
 
             current = frame_idx + 1
             if on_progress and (current % 10 == 0 or current == total_frames):

@@ -20,7 +20,7 @@ from sqlalchemy.orm import selectinload
 from app.core.auth import get_current_user
 from app.core.config import settings
 from app.core.database import get_db
-from app.models.models import Session, SessionStatus, User
+from app.models.models import CameraConfig, Session, SessionStatus, User
 from app.schemas.schemas import SessionDetailOut, SessionOut, SessionStartRequest
 
 router = APIRouter(prefix="/sessions", tags=["sessions"])
@@ -34,6 +34,35 @@ def _session_dir(session: Session) -> Path | None:
     if not session.on_axis_path:
         return None
     return Path(session.on_axis_path).parent
+
+
+def _serialize_camera_config(config: CameraConfig | None) -> dict:
+    if config is None:
+        return {
+            "on_axis_serial": "",
+            "off_axis_serial": "",
+            "on_axis_swap_eyes": False,
+            "off_axis_swap_eyes": False,
+            "on_axis_rotation": 0,
+            "off_axis_rotation": 0,
+            "on_axis_flip_h": False,
+            "on_axis_flip_v": False,
+            "off_axis_flip_h": False,
+            "off_axis_flip_v": False,
+        }
+
+    return {
+        "on_axis_serial": config.on_axis_serial,
+        "off_axis_serial": config.off_axis_serial,
+        "on_axis_swap_eyes": config.on_axis_swap_eyes,
+        "off_axis_swap_eyes": config.off_axis_swap_eyes,
+        "on_axis_rotation": config.on_axis_rotation,
+        "off_axis_rotation": config.off_axis_rotation,
+        "on_axis_flip_h": config.on_axis_flip_h,
+        "on_axis_flip_v": config.on_axis_flip_v,
+        "off_axis_flip_h": config.off_axis_flip_h,
+        "off_axis_flip_v": config.off_axis_flip_v,
+    }
 
 
 def _build_grading_job(session: Session) -> str:
@@ -173,11 +202,14 @@ async def start_session(
         logger.info("Copied stereo calibration into session dir")
 
     # Write session_metadata.json
+    config_result = await db.execute(select(CameraConfig).where(CameraConfig.id == 1))
+    active_camera_config = config_result.scalar_one_or_none()
     metadata = {
         "session_id": str(session.id),
         "user_id": str(current_user.id),
         "started_at": now.isoformat(),
         "cameras": {},
+        "camera_config": _serialize_camera_config(active_camera_config),
         "zed_sdk_version": "unknown",
         "software_version": "1.0.0",
     }
