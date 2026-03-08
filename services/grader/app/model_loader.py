@@ -34,6 +34,12 @@ def _get_backend_class(model_type: str) -> type[ModelBackend]:
             "cotracker": CoTrackerBackend,
         })
 
+        try:
+            from app.backends.sam2_backend import SAM2Backend
+            _BACKEND_CLASSES["sam2"] = SAM2Backend
+        except ImportError:
+            logger.info("SAM2 backend not available (sam2 package not installed)")
+
     cls = _BACKEND_CLASSES.get(model_type)
     if cls is None:
         raise ValueError(f"Unknown model type: {model_type}")

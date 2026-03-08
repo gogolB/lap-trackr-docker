@@ -32,3 +32,18 @@ CAMERA_CY: float = float(os.environ.get("CAMERA_CY", "360.0"))
 # Target FPS assumed for timing calculations when SVO2 metadata is
 # unavailable (ZED cameras typically record at 30 fps).
 DEFAULT_FPS: float = float(os.environ.get("DEFAULT_FPS", "30.0"))
+
+# Pipeline mode: "v2" (6-pass offline) or "legacy" (original multi-pass)
+PIPELINE_MODE: str = os.environ.get("PIPELINE_MODE", "v2")
+
+# SAM2 model paths
+SAM2_MODEL_PATH: str = os.environ.get(
+    "SAM2_MODEL_PATH", "/data/models/sam2/sam2.1_hiera_large.pt"
+)
+SAM2_CONFIG_PATH: str = os.environ.get(
+    "SAM2_CONFIG_PATH", "configs/sam2.1/sam2.1_hiera_l.yaml"
+)
+
+# CoTracker v3 chunked processing settings
+COTRACKER_CHUNK_SIZE: int = int(os.environ.get("COTRACKER_CHUNK_SIZE", "300"))
+COTRACKER_OVERLAP: int = int(os.environ.get("COTRACKER_OVERLAP", "30"))

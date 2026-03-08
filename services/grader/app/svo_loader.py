@@ -260,6 +260,25 @@ def _try_load_from_exports(
             depth_data.close()
 
 
+def load_frames_list(
+    svo_path: str,
+    sample_interval: int | None = None,
+    on_progress: Callable[[int, int], None] | None = None,
+    camera_config: dict | None = None,
+) -> Tuple[List[np.ndarray], List[np.ndarray], float]:
+    """Convenience wrapper that returns frames and depth for in-memory processing.
+
+    Identical to :func:`load_svo2` but named explicitly for the v2 pipeline
+    where callers need raw frame lists rather than file paths.
+    """
+    return load_svo2(
+        svo_path,
+        sample_interval=sample_interval,
+        on_progress=on_progress,
+        camera_config=camera_config,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Fallback for environments without the ZED SDK
 # ---------------------------------------------------------------------------

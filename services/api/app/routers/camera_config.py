@@ -24,6 +24,11 @@ async def _get_or_create_config(db: AsyncSession) -> CameraConfig:
             id=1,
             on_axis_serial="",
             off_axis_serial="",
+            camera_fps=60,
+            on_axis_whitebalance_auto=True,
+            off_axis_whitebalance_auto=True,
+            on_axis_whitebalance_temperature=4600,
+            off_axis_whitebalance_temperature=4600,
         )
         db.add(config)
         await db.commit()
@@ -43,6 +48,11 @@ def _build_camera_payload(config: CameraConfig) -> dict:
         "on_axis_flip_v": config.on_axis_flip_v,
         "off_axis_flip_h": config.off_axis_flip_h,
         "off_axis_flip_v": config.off_axis_flip_v,
+        "camera_fps": config.camera_fps,
+        "on_axis_whitebalance_auto": config.on_axis_whitebalance_auto,
+        "off_axis_whitebalance_auto": config.off_axis_whitebalance_auto,
+        "on_axis_whitebalance_temperature": config.on_axis_whitebalance_temperature,
+        "off_axis_whitebalance_temperature": config.off_axis_whitebalance_temperature,
     }
 
 

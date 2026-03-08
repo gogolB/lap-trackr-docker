@@ -50,6 +50,11 @@ def _serialize_camera_config(config: CameraConfig | None) -> dict:
             "on_axis_flip_v": False,
             "off_axis_flip_h": False,
             "off_axis_flip_v": False,
+            "camera_fps": 60,
+            "on_axis_whitebalance_auto": True,
+            "off_axis_whitebalance_auto": True,
+            "on_axis_whitebalance_temperature": 4600,
+            "off_axis_whitebalance_temperature": 4600,
         }
 
     return {
@@ -63,6 +68,11 @@ def _serialize_camera_config(config: CameraConfig | None) -> dict:
         "on_axis_flip_v": config.on_axis_flip_v,
         "off_axis_flip_h": config.off_axis_flip_h,
         "off_axis_flip_v": config.off_axis_flip_v,
+        "camera_fps": config.camera_fps,
+        "on_axis_whitebalance_auto": config.on_axis_whitebalance_auto,
+        "off_axis_whitebalance_auto": config.off_axis_whitebalance_auto,
+        "on_axis_whitebalance_temperature": config.on_axis_whitebalance_temperature,
+        "off_axis_whitebalance_temperature": config.off_axis_whitebalance_temperature,
     }
 
 

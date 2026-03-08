@@ -103,6 +103,35 @@ const GRADING_STAGES: StageDefinition[] = [
   { key: "calculate_metrics", label: "Calculate Metrics" },
 ];
 
+const GRADING_STAGES_V2: StageDefinition[] = [
+  { key: "load_frames", label: "Load Camera Frames" },
+  { key: "pass1_sam2", label: "Segmentation (SAM2)" },
+  { key: "pass2_cotracker", label: "Point Tracking (CoTracker)" },
+  { key: "pass3_color", label: "Color Gap Filling" },
+  { key: "pass4_triangulation", label: "Stereo Triangulation" },
+  { key: "pass5_smoothing", label: "Trajectory Smoothing" },
+  { key: "pass6_identity", label: "Identity Verification" },
+  { key: "render_tracking", label: "Render Tracking Videos" },
+  { key: "calculate_metrics", label: "Calculate Metrics" },
+];
+
+const V2_ONLY_KEYS = new Set([
+  "load_frames",
+  "pass1_sam2",
+  "pass2_cotracker",
+  "pass3_color",
+  "pass4_triangulation",
+  "pass5_smoothing",
+  "pass6_identity",
+  "render_tracking",
+]);
+
+function resolveGradingStages(progress?: JobProgress): StageDefinition[] {
+  const stageKeys = progress?.stages ? Object.keys(progress.stages) : [];
+  const isV2 = stageKeys.some((key) => V2_ONLY_KEYS.has(key));
+  return isV2 ? GRADING_STAGES_V2 : GRADING_STAGES;
+}
+
 function formatEta(seconds: number | null): string {
   if (seconds === null || !Number.isFinite(seconds)) return "--";
   const rounded = Math.max(0, Math.ceil(seconds));
@@ -378,7 +407,7 @@ export default function SessionDetail() {
       : [];
   const gradingStageProgress =
     session.status === "grading"
-      ? buildStageProgress(GRADING_STAGES, progress)
+      ? buildStageProgress(resolveGradingStages(progress), progress)
       : [];
 
   return (

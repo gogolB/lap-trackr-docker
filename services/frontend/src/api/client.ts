@@ -581,6 +581,11 @@ export interface CameraConfig {
   on_axis_flip_v: boolean;
   off_axis_flip_h: boolean;
   off_axis_flip_v: boolean;
+  camera_fps: number;
+  on_axis_whitebalance_auto: boolean;
+  off_axis_whitebalance_auto: boolean;
+  on_axis_whitebalance_temperature: number;
+  off_axis_whitebalance_temperature: number;
   updated_at: string | null;
 }
 
@@ -595,6 +600,11 @@ export interface CameraConfigUpdate {
   on_axis_flip_v?: boolean;
   off_axis_flip_h?: boolean;
   off_axis_flip_v?: boolean;
+  camera_fps?: number;
+  on_axis_whitebalance_auto?: boolean;
+  off_axis_whitebalance_auto?: boolean;
+  on_axis_whitebalance_temperature?: number;
+  off_axis_whitebalance_temperature?: number;
 }
 
 export async function getCameraConfig(): Promise<CameraConfig> {

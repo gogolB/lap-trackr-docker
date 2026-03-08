@@ -125,6 +125,11 @@ camera_config_table = Table(
     Column("on_axis_flip_v", Boolean, nullable=False),
     Column("off_axis_flip_h", Boolean, nullable=False),
     Column("off_axis_flip_v", Boolean, nullable=False),
+    Column("camera_fps", Integer, nullable=False),
+    Column("on_axis_whitebalance_auto", Boolean, nullable=False),
+    Column("off_axis_whitebalance_auto", Boolean, nullable=False),
+    Column("on_axis_whitebalance_temperature", Integer, nullable=False),
+    Column("off_axis_whitebalance_temperature", Integer, nullable=False),
     Column("updated_at", DateTime(timezone=True), nullable=True),
 )
 
@@ -200,6 +205,11 @@ def get_camera_config() -> dict[str, Any] | None:
         "on_axis_flip_v": bool(row.on_axis_flip_v),
         "off_axis_flip_h": bool(row.off_axis_flip_h),
         "off_axis_flip_v": bool(row.off_axis_flip_v),
+        "camera_fps": int(row.camera_fps),
+        "on_axis_whitebalance_auto": bool(row.on_axis_whitebalance_auto),
+        "off_axis_whitebalance_auto": bool(row.off_axis_whitebalance_auto),
+        "on_axis_whitebalance_temperature": int(row.on_axis_whitebalance_temperature),
+        "off_axis_whitebalance_temperature": int(row.off_axis_whitebalance_temperature),
     }
 
 
@@ -213,7 +223,19 @@ def save_results(session_id: str, results: dict[str, Any]) -> None:
 
     metrics: dict = results.get("metrics", {})
     poses: list = results.get("poses", [])
-    warnings: list | None = results.get("warnings") or None
+    warnings: list = list(results.get("warnings") or [])
+    pipeline_mode: str | None = results.get("pipeline_mode")
+    timings: dict | None = results.get("timings")
+
+    # Prepend pipeline metadata as a structured warning entry (avoids DB migration)
+    if pipeline_mode and timings:
+        total = sum(timings.values())
+        parts = ", ".join(f"{k}: {v:.1f}s" for k, v in timings.items())
+        warnings.insert(
+            0,
+            f"Pipeline info: pipeline={pipeline_mode}; total={total:.1f}s ({parts})",
+        )
+
     now = datetime.now(timezone.utc)
 
     engine = _get_engine()
@@ -235,7 +257,7 @@ def save_results(session_id: str, results: dict[str, Any]) -> None:
             "total_time": metrics.get("total_time"),
             "completed_at": now,
             "error": None,
-            "warnings": warnings,
+            "warnings": warnings or None,
         }
 
         if existing is not None:
@@ -269,6 +291,12 @@ def save_results(session_id: str, results: dict[str, Any]) -> None:
     with open(poses_path, "w") as f:
         json.dump(poses, f, indent=2)
     logger.info("Wrote %s", poses_path)
+
+    if pipeline_mode and timings:
+        timings_path = os.path.join(results_dir, "timings.json")
+        with open(timings_path, "w") as f:
+            json.dump({"pipeline_mode": pipeline_mode, "timings": timings}, f, indent=2)
+        logger.info("Wrote %s", timings_path)
 
 
 def save_error(session_id: str, error_message: str) -> None:

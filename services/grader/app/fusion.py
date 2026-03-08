@@ -16,6 +16,60 @@ logger = logging.getLogger("grader.fusion")
 _POSE_META_KEYS = {"frame_idx", "timestamp"}
 
 
+def triangulate_dlt_svd(
+    pt_on: tuple[float, float],
+    pt_off: tuple[float, float],
+    P_on: np.ndarray,
+    P_off: np.ndarray,
+) -> np.ndarray | None:
+    """DLT triangulation via SVD for a single point correspondence.
+
+    Parameters
+    ----------
+    pt_on, pt_off : (x, y) pixel coordinates in each view.
+    P_on, P_off : 3x4 projection matrices.
+
+    Returns (3,) array or None if degenerate.
+    """
+    x1, y1 = pt_on
+    x2, y2 = pt_off
+
+    A = np.array([
+        x1 * P_on[2] - P_on[0],
+        y1 * P_on[2] - P_on[1],
+        x2 * P_off[2] - P_off[0],
+        y2 * P_off[2] - P_off[1],
+    ], dtype=np.float64)
+
+    _, _, Vt = np.linalg.svd(A)
+    X = Vt[-1]
+    if abs(X[3]) < 1e-10:
+        return None
+
+    point = X[:3] / X[3]
+    if not all(math.isfinite(v) for v in point):
+        return None
+    return point
+
+
+def compute_reprojection_error(
+    point_3d: np.ndarray,
+    pt_2d: tuple[float, float],
+    P: np.ndarray,
+) -> float:
+    """Compute reprojection error for a 3D point projected through P.
+
+    Returns pixel distance between observed and reprojected point.
+    """
+    X_h = np.append(point_3d, 1.0)
+    projected = P @ X_h
+    if abs(projected[2]) < 1e-10:
+        return float("inf")
+    px = projected[0] / projected[2]
+    py = projected[1] / projected[2]
+    return float(math.hypot(px - pt_2d[0], py - pt_2d[1]))
+
+
 class StereoFusionError(Exception):
     """Raised when stereo fusion cannot proceed (e.g. singular extrinsic matrix)."""
 

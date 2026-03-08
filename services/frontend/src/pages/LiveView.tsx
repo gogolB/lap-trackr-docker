@@ -20,7 +20,15 @@ import {
 type ViewStatus = "idle" | "recording" | "stopping";
 
 /** MJPEG <img> wrapper with auto-reconnection on stream drop. */
-function MjpegStream({ src, alt }: { src: string; alt: string }) {
+function MjpegStream({
+  src,
+  alt,
+  zoom,
+}: {
+  src: string;
+  alt: string;
+  zoom: number;
+}) {
   const imgRef = useRef<HTMLImageElement>(null);
   const retryTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [retryKey, setRetryKey] = useState(0);
@@ -45,14 +53,17 @@ function MjpegStream({ src, alt }: { src: string; alt: string }) {
     : `${src}${src.includes("?") ? "&" : "?"}_t=${retryKey}`;
 
   return (
-    <img
-      key={retryKey}
-      ref={imgRef}
-      src={streamSrc}
-      alt={alt}
-      className="h-full w-full object-contain"
-      onError={handleError}
-    />
+    <div className="h-full w-full overflow-hidden bg-black">
+      <img
+        key={retryKey}
+        ref={imgRef}
+        src={streamSrc}
+        alt={alt}
+        className="h-full w-full object-contain transition-transform duration-150"
+        style={{ transform: `scale(${zoom})`, transformOrigin: "center center" }}
+        onError={handleError}
+      />
+    </div>
   );
 }
 
@@ -92,6 +103,7 @@ export default function LiveView() {
   const [visibleEyes, setVisibleEyes] = useState<Set<EyeFeed>>(
     new Set(["left"])
   );
+  const [previewZoom, setPreviewZoom] = useState(1);
 
   const visibleFeeds = ALL_FEEDS.filter(
     (f) => visibleCameras.has(f.camera) && visibleEyes.has(f.eye)
@@ -177,7 +189,6 @@ export default function LiveView() {
   const handleStart = useCallback(async () => {
     setError("");
     try {
-      await applyCameraConfig();
       const session = await startSession(sessionName);
       setActiveSession(session);
       setStatus("recording");
@@ -334,6 +345,7 @@ export default function LiveView() {
                 <MjpegStream
                   src={streamUrl(cam, e)}
                   alt={`${cam} ${e}`}
+                  zoom={previewZoom}
                 />
                 {/* Label overlay */}
                 <div className="absolute left-2 top-2 rounded bg-black/60 px-2 py-1 text-xs font-medium text-white backdrop-blur-sm">
@@ -488,6 +500,44 @@ export default function LiveView() {
                 </button>
               ))}
             </div>
+          </div>
+
+          <div className="mt-3 border-t border-slate-800 pt-3">
+            <div className="mb-1.5 flex items-center justify-between gap-3">
+              <label
+                htmlFor="preview-zoom"
+                className="text-xs font-medium text-slate-400"
+              >
+                Preview Zoom
+              </label>
+              <button
+                type="button"
+                onClick={() => setPreviewZoom(1)}
+                className="rounded-lg bg-slate-700/50 px-2 py-1 text-xs font-medium text-slate-300 transition-colors hover:bg-slate-700"
+              >
+                Reset
+              </button>
+            </div>
+            <input
+              id="preview-zoom"
+              type="range"
+              min={1}
+              max={3}
+              step={0.1}
+              value={previewZoom}
+              onChange={(e) => setPreviewZoom(Number(e.target.value))}
+              className="w-full accent-teal-500"
+            />
+            <div className="mt-1 flex items-center justify-between text-xs text-slate-500">
+              <span>1.0x</span>
+              <span className="font-medium text-slate-300">
+                {previewZoom.toFixed(1)}x
+              </span>
+              <span>3.0x</span>
+            </div>
+            <p className="mt-2 text-xs text-slate-500">
+              Preview only. Recording, export, and calibration stay unchanged.
+            </p>
           </div>
         </div>
 

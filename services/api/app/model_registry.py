@@ -26,4 +26,13 @@ MODEL_CATALOG: list[dict] = [
         "auto_activate": True,
         "download_url": "https://huggingface.co/facebook/cotracker3/resolve/main/scaled_offline.pth",
     },
+    {
+        "slug": "sam2.1-hiera-large",
+        "name": "SAM 2.1 Hiera Large",
+        "model_type": "sam2",
+        "description": "Video segmentation for instrument mask generation.",
+        "version": "2.1",
+        "local_path": "sam2/sam2.1_hiera_large.pt",
+        "auto_activate": True,
+    },
 ]

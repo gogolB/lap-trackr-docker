@@ -13,6 +13,8 @@ class Config:
     CAMERA_HOST: str = os.environ.get("CAMERA_HOST", "0.0.0.0")
     CAMERA_PORT: int = int(os.environ.get("CAMERA_PORT", "8001"))
     ZED_OPEN_RETRY_INTERVAL_S: float = float(os.environ.get("ZED_OPEN_RETRY_INTERVAL_S", "5.0"))
+    CAMERA_TARGET_FPS_DEFAULT: int = int(os.environ.get("CAMERA_TARGET_FPS_DEFAULT", "60"))
+    WHITEBALANCE_TEMPERATURE_DEFAULT: int = int(os.environ.get("WHITEBALANCE_TEMPERATURE_DEFAULT", "4600"))
 
     # ChArUco board calibration
     CHARUCO_ROWS: int = int(os.environ.get("CHARUCO_ROWS", "9"))

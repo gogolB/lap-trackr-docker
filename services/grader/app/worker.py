@@ -14,7 +14,7 @@ import redis
 from app.camera_transform import load_camera_config_from_session_dir
 from app.config import REDIS_URL
 from app.db import get_camera_config, save_error, save_results, update_session_status
-from app.pipeline import run_pipeline
+from app.pipeline import grade, run_pipeline
 
 logging.basicConfig(
     level=logging.INFO,
@@ -139,7 +139,7 @@ def main() -> None:
             def on_progress(stage: str, current: int, total: int, detail: str = "") -> None:
                 _publish_progress(redis_client, session_id, stage, current, total, detail)
 
-            results = run_pipeline(job, on_progress=on_progress)
+            results = grade(job, on_progress=on_progress)
 
             _publish_progress(redis_client, session_id, "complete", 1, 1)
             save_results(session_id, results)

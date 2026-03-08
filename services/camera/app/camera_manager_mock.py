@@ -30,6 +30,12 @@ class MockCameraManager:
         self._frame_counter = 0
         self._swap_eyes: dict[str, bool] = {"on_axis": False, "off_axis": False}
         self._flip: dict[str, bool] = {"on_axis": False, "off_axis": False}
+        self._camera_fps: int = getattr(config, "CAMERA_TARGET_FPS_DEFAULT", 60)
+        self._whitebalance_auto: dict[str, bool] = {"on_axis": True, "off_axis": True}
+        self._whitebalance_temperature: dict[str, int] = {
+            "on_axis": getattr(config, "WHITEBALANCE_TEMPERATURE_DEFAULT", 4600),
+            "off_axis": getattr(config, "WHITEBALANCE_TEMPERATURE_DEFAULT", 4600),
+        }
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -50,7 +56,7 @@ class MockCameraManager:
             self._camera_info[name] = {
                 "serial": serial,
                 "resolution": [1920, 1200],
-                "fps": 30,
+                "fps": self._camera_fps,
             }
             print(f"[mock_camera] Opened {name} (serial {serial}) -- MOCK MODE")
 
@@ -96,6 +102,15 @@ class MockCameraManager:
             "on_axis": config.get("on_axis_swap_eyes", False),
             "off_axis": config.get("off_axis_swap_eyes", False),
         }
+        self._camera_fps = int(config.get("camera_fps", self._camera_fps))
+        self._whitebalance_auto = {
+            "on_axis": bool(config.get("on_axis_whitebalance_auto", True)),
+            "off_axis": bool(config.get("off_axis_whitebalance_auto", True)),
+        }
+        self._whitebalance_temperature = {
+            "on_axis": int(config.get("on_axis_whitebalance_temperature", self._whitebalance_temperature["on_axis"])),
+            "off_axis": int(config.get("off_axis_whitebalance_temperature", self._whitebalance_temperature["off_axis"])),
+        }
         self._flip = {
             "on_axis": config.get("on_axis_flip", False),
             "off_axis": config.get("off_axis_flip", False),
@@ -110,7 +125,8 @@ class MockCameraManager:
 
         print(
             f"[mock_camera] Config applied: swap_eyes={self._swap_eyes}, "
-            f"flip={self._flip}, serials={self.serials}"
+            f"flip={self._flip}, serials={self.serials}, fps={self._camera_fps}, "
+            f"wb_auto={self._whitebalance_auto}, wb_temp={self._whitebalance_temperature}"
         )
 
     # ------------------------------------------------------------------
@@ -190,6 +206,10 @@ class MockCameraManager:
             "zed_sdk_version": "mock",
         }
 
+    def get_stream_interval_seconds(self, camera_name: str) -> float:
+        fps = max(1, int(self._camera_fps))
+        return 1.0 / fps
+
     def capture_calibration_frame(self, camera_name: str) -> tuple[bytes | None, np.ndarray | None]:
         if camera_name not in self.cameras:
             return None, None
@@ -216,6 +236,7 @@ class MockCameraManager:
             cameras_info[name] = {
                 "serial": serial,
                 "opened": name in self.cameras,
+                "fps": self._camera_fps,
             }
         return {
             "recording": self.recording,

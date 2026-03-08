@@ -200,6 +200,11 @@ class CameraConfig(Base):
     on_axis_flip_v: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     off_axis_flip_h: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     off_axis_flip_v: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    camera_fps: Mapped[int] = mapped_column(Integer, default=60, nullable=False)
+    on_axis_whitebalance_auto: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    off_axis_whitebalance_auto: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    on_axis_whitebalance_temperature: Mapped[int] = mapped_column(Integer, default=4600, nullable=False)
+    off_axis_whitebalance_temperature: Mapped[int] = mapped_column(Integer, default=4600, nullable=False)
     updated_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),

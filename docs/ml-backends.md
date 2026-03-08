@@ -158,16 +158,3 @@ Then:
 2. Register it in `services/grader/app/model_loader.py`
 3. Add it to `services/api/app/model_registry.py` if it should appear in the managed catalog
 4. Document exactly which pass it serves in the offline pipeline
-
-```
-Load frames (svo_loader)
-  -> Load query points from tip_init.json (if point tracking backend)
-  -> backend.detect(frames, query_points)
-  -> 2D detections per frame
-  -> Render tracking overlay video
-  -> Back-project to 3D using depth + calibration
-  -> If dual camera: fuse with stereo triangulation
-  -> Calculate surgical metrics
-```
-
-Query points are sourced from `tip_init.json` in the session directory. Point tracking backends (CoTracker, TAPIR) use these to initialize tracking. Detection backends (YOLO) and segmentation backends (SAM2) ignore query points and detect tips independently per frame.

@@ -70,6 +70,24 @@ export default function ConfigPage() {
     setForm({ ...form, [key]: value });
   };
 
+  const buildPayload = (value: CameraConfig) => ({
+    on_axis_serial: value.on_axis_serial,
+    off_axis_serial: value.off_axis_serial,
+    on_axis_swap_eyes: value.on_axis_swap_eyes,
+    off_axis_swap_eyes: value.off_axis_swap_eyes,
+    on_axis_rotation: value.on_axis_rotation,
+    off_axis_rotation: value.off_axis_rotation,
+    on_axis_flip_h: value.on_axis_flip_h,
+    on_axis_flip_v: value.on_axis_flip_v,
+    off_axis_flip_h: value.off_axis_flip_h,
+    off_axis_flip_v: value.off_axis_flip_v,
+    camera_fps: value.camera_fps,
+    on_axis_whitebalance_auto: value.on_axis_whitebalance_auto,
+    off_axis_whitebalance_auto: value.off_axis_whitebalance_auto,
+    on_axis_whitebalance_temperature: value.on_axis_whitebalance_temperature,
+    off_axis_whitebalance_temperature: value.off_axis_whitebalance_temperature,
+  });
+
   const handleSwapCameras = () => {
     if (!form) return;
     setForm({
@@ -84,18 +102,7 @@ export default function ConfigPage() {
     setIsSaving(true);
     setMessage(null);
     try {
-      await updateCameraConfig({
-        on_axis_serial: form.on_axis_serial,
-        off_axis_serial: form.off_axis_serial,
-        on_axis_swap_eyes: form.on_axis_swap_eyes,
-        off_axis_swap_eyes: form.off_axis_swap_eyes,
-        on_axis_rotation: form.on_axis_rotation,
-        off_axis_rotation: form.off_axis_rotation,
-        on_axis_flip_h: form.on_axis_flip_h,
-        on_axis_flip_v: form.on_axis_flip_v,
-        off_axis_flip_h: form.off_axis_flip_h,
-        off_axis_flip_v: form.off_axis_flip_v,
-      });
+      await updateCameraConfig(buildPayload(form));
       queryClient.invalidateQueries({ queryKey: ["camera-config"] });
       setMessage({ type: "success", text: "Configuration saved." });
     } catch (err) {
@@ -109,24 +116,12 @@ export default function ConfigPage() {
   };
 
   const handleApply = async () => {
+    if (!form) return;
     setIsApplying(true);
     setMessage(null);
     try {
       // Save first, then apply
-      if (form) {
-        await updateCameraConfig({
-          on_axis_serial: form.on_axis_serial,
-          off_axis_serial: form.off_axis_serial,
-          on_axis_swap_eyes: form.on_axis_swap_eyes,
-          off_axis_swap_eyes: form.off_axis_swap_eyes,
-          on_axis_rotation: form.on_axis_rotation,
-          off_axis_rotation: form.off_axis_rotation,
-          on_axis_flip_h: form.on_axis_flip_h,
-          on_axis_flip_v: form.on_axis_flip_v,
-          off_axis_flip_h: form.off_axis_flip_h,
-          off_axis_flip_v: form.off_axis_flip_v,
-        });
-      }
+      await updateCameraConfig(buildPayload(form));
       await applyCameraConfig();
       queryClient.invalidateQueries({ queryKey: ["camera-config"] });
       setMessage({
@@ -164,7 +159,7 @@ export default function ConfigPage() {
       <div>
         <h1 className="text-2xl font-bold text-white">Camera Configuration</h1>
         <p className="mt-1 text-sm text-slate-400">
-          Configure camera serial assignments, eye swap, and rotation settings
+          Configure serial assignment, capture rate, orientation, and white balance
         </p>
       </div>
 
@@ -179,6 +174,34 @@ export default function ConfigPage() {
           {message.text}
         </div>
       )}
+
+      <div className="card space-y-4">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+          <div>
+            <h2 className="text-lg font-semibold text-white">
+              Capture and Stream Rate
+            </h2>
+            <p className="mt-1 text-sm text-slate-400">
+              Request 60 FPS for live view and recording. If the camera or link
+              cannot sustain it, the service falls back to 30 or 15 FPS.
+            </p>
+          </div>
+          <label className="space-y-1">
+            <span className="block text-sm font-medium text-slate-300">
+              Target FPS
+            </span>
+            <select
+              value={form.camera_fps}
+              onChange={(e) => updateField("camera_fps", Number(e.target.value))}
+              className="min-w-36 rounded-lg border border-slate-600 bg-slate-800 px-3 py-2 text-sm text-white focus:border-teal-500 focus:outline-none focus:ring-1 focus:ring-teal-500"
+            >
+              <option value={60}>60 FPS</option>
+              <option value={30}>30 FPS</option>
+              <option value={15}>15 FPS</option>
+            </select>
+          </label>
+        </div>
+      </div>
 
       <div className="grid gap-6 lg:grid-cols-2">
         {/* On-Axis Camera */}
@@ -230,6 +253,46 @@ export default function ConfigPage() {
               checked={form.on_axis_flip_v}
               onChange={(v) => updateField("on_axis_flip_v", v)}
             />
+            <div className="rounded-lg border border-slate-700 bg-slate-900/40 p-3">
+              <div className="mb-3 flex items-center justify-between gap-3">
+                <div>
+                  <div className="text-sm font-medium text-slate-200">
+                    White Balance
+                  </div>
+                  <div className="text-xs text-slate-400">
+                    Auto keeps exposure-driven adjustments. Manual locks color
+                    temperature for more stable tape colors.
+                  </div>
+                </div>
+              </div>
+              <div className="space-y-3">
+                <Toggle
+                  label="Auto White Balance"
+                  checked={form.on_axis_whitebalance_auto}
+                  onChange={(v) => updateField("on_axis_whitebalance_auto", v)}
+                />
+                <label className="block">
+                  <span className="mb-1.5 block text-sm text-slate-300">
+                    White Balance Temperature (K)
+                  </span>
+                  <input
+                    type="number"
+                    min={2800}
+                    max={6500}
+                    step={100}
+                    value={form.on_axis_whitebalance_temperature}
+                    disabled={form.on_axis_whitebalance_auto}
+                    onChange={(e) =>
+                      updateField(
+                        "on_axis_whitebalance_temperature",
+                        Number(e.target.value)
+                      )
+                    }
+                    className="w-full rounded-lg border border-slate-600 bg-slate-800 px-3 py-2 text-sm text-white focus:border-teal-500 focus:outline-none focus:ring-1 focus:ring-teal-500 disabled:cursor-not-allowed disabled:border-slate-700 disabled:bg-slate-900 disabled:text-slate-500"
+                  />
+                </label>
+              </div>
+            </div>
           </div>
         </div>
 
@@ -282,6 +345,46 @@ export default function ConfigPage() {
               checked={form.off_axis_flip_v}
               onChange={(v) => updateField("off_axis_flip_v", v)}
             />
+            <div className="rounded-lg border border-slate-700 bg-slate-900/40 p-3">
+              <div className="mb-3 flex items-center justify-between gap-3">
+                <div>
+                  <div className="text-sm font-medium text-slate-200">
+                    White Balance
+                  </div>
+                  <div className="text-xs text-slate-400">
+                    Use manual Kelvin when the auto balance drifts and the tape
+                    colors stop looking reliable.
+                  </div>
+                </div>
+              </div>
+              <div className="space-y-3">
+                <Toggle
+                  label="Auto White Balance"
+                  checked={form.off_axis_whitebalance_auto}
+                  onChange={(v) => updateField("off_axis_whitebalance_auto", v)}
+                />
+                <label className="block">
+                  <span className="mb-1.5 block text-sm text-slate-300">
+                    White Balance Temperature (K)
+                  </span>
+                  <input
+                    type="number"
+                    min={2800}
+                    max={6500}
+                    step={100}
+                    value={form.off_axis_whitebalance_temperature}
+                    disabled={form.off_axis_whitebalance_auto}
+                    onChange={(e) =>
+                      updateField(
+                        "off_axis_whitebalance_temperature",
+                        Number(e.target.value)
+                      )
+                    }
+                    className="w-full rounded-lg border border-slate-600 bg-slate-800 px-3 py-2 text-sm text-white focus:border-teal-500 focus:outline-none focus:ring-1 focus:ring-teal-500 disabled:cursor-not-allowed disabled:border-slate-700 disabled:bg-slate-900 disabled:text-slate-500"
+                  />
+                </label>
+              </div>
+            </div>
           </div>
         </div>
       </div>

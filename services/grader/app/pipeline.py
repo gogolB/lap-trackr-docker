@@ -14,7 +14,7 @@ import numpy as np
 from app.backends.base import Detection
 from app.camera_transform import adjust_calibration
 from app.color_detector import analyze_tip_frame
-from app.config import FRAME_SAMPLE_INTERVAL
+from app.config import FRAME_SAMPLE_INTERVAL, PIPELINE_MODE
 from app.db import get_active_model_info
 from app.exporter import _build_candidate_frame_indices
 from app.metrics import calculate_metrics
@@ -1109,3 +1109,307 @@ def run_pipeline(job: dict, on_progress: ProgressCallback = None) -> dict[str, A
     if warnings:
         result["warnings"] = warnings
     return result
+
+
+# ---------------------------------------------------------------------------
+# V2 pipeline: 6-pass offline grading
+# ---------------------------------------------------------------------------
+
+
+def _tracks_to_detections(
+    tracks: dict[str, np.ndarray],
+    visibility: dict[str, np.ndarray],
+    visibility_threshold: float = 0.3,
+) -> list[list[Detection]]:
+    """Convert PassData track arrays to ``list[list[Detection]]`` for the renderer.
+
+    For each frame, emits a Detection per label where visibility >= threshold
+    and position is not NaN.
+    """
+    if not tracks:
+        return []
+    n_frames = max(len(t) for t in tracks.values())
+    result: list[list[Detection]] = []
+    for fidx in range(n_frames):
+        frame_dets: list[Detection] = []
+        for label, positions in tracks.items():
+            if fidx >= len(positions):
+                continue
+            x, y = float(positions[fidx, 0]), float(positions[fidx, 1])
+            if np.isnan(x) or np.isnan(y):
+                continue
+            vis = visibility.get(label)
+            v = float(vis[fidx]) if vis is not None and fidx < len(vis) else 0.0
+            if v < visibility_threshold:
+                continue
+            frame_dets.append(Detection(
+                x=x, y=y, confidence=v, label=label, source="v2_pipeline",
+            ))
+        result.append(frame_dets)
+    return result
+
+
+def run_v2_pipeline(job: dict, on_progress: ProgressCallback = None) -> dict[str, Any]:
+    """Run the 6-pass offline grading pipeline.
+
+    Pass 1: SAM2 segmentation → per-instrument binary masks
+    Pass 2: CoTracker v3 refinement → 2D tracks + visibility
+    Pass 3: Adaptive color gap filling → fill gaps in tracks (CPU)
+    Pass 4: Stereo triangulation → 3D positions (CPU)
+    Pass 5: RTS smoothing → smoothed 3D trajectories (CPU)
+    Pass 6: Identity verification → swap check (CPU)
+
+    GPU models are loaded and unloaded sequentially (SAM2 then CoTracker).
+    """
+    import time
+
+    from app.passes.pass_data import PassData
+    from app.passes import pass1_sam2, pass2_cotracker, pass3_color
+    from app.passes import pass4_triangulation, pass5_smoothing, pass6_identity
+
+    def _progress(stage: str, current: int, total: int, detail: str = "") -> None:
+        if on_progress:
+            on_progress(stage, current, total, detail)
+
+    on_axis_path: str = job["on_axis_path"]
+    off_axis_path: str = job["off_axis_path"]
+    results_dir = _results_dir(job)
+    warnings: list[str] = []
+    timings: dict[str, float] = {}
+
+    # SVO2 files may not exist when running offline with MP4+NPZ exports.
+    # The svo_loader derives session_dir from the path and falls back to
+    # exported MP4+NPZ files automatically.
+    session_dir_check = Path(on_axis_path).parent
+    on_stem = Path(on_axis_path).stem
+    off_stem = Path(off_axis_path).stem
+    if not Path(on_axis_path).exists() and not (session_dir_check / f"{on_stem}_left.mp4").exists():
+        raise FileNotFoundError(f"On-axis source not found (no SVO2 or MP4): {on_axis_path}")
+    if not Path(off_axis_path).exists() and not (session_dir_check / f"{off_stem}_left.mp4").exists():
+        raise FileNotFoundError(f"Off-axis source not found (no SVO2 or MP4): {off_axis_path}")
+
+    camera_config = job.get("camera_config")
+
+    # Load calibrations
+    on_calibration = _load_calibration(job, "calibration_path")
+    off_calibration = _load_off_axis_calibration(job)
+    stereo_calibration = _load_stereo_calibration(job)
+
+    on_calibration = adjust_calibration(on_calibration, camera_config, "on_axis")
+    off_calibration = adjust_calibration(off_calibration, camera_config, "off_axis")
+
+    # Load frames
+    _progress("load_frames", 0, 2, "Loading on-axis frames")
+    logger.info("V2 Pipeline: Loading frames")
+    frames, depth_maps, fps = load_svo2(
+        on_axis_path,
+        on_progress=lambda c, t: _progress("load_frames", c, t, "Loading on-axis"),
+        camera_config=camera_config,
+    )
+    _progress("load_frames", 1, 2, "Loading off-axis frames")
+    off_frames, off_depth, off_fps = load_svo2(
+        off_axis_path,
+        on_progress=lambda c, t: _progress("load_frames", c, t, "Loading off-axis"),
+        camera_config=camera_config,
+    )
+    logger.info("Loaded %d on-axis, %d off-axis frames at %.1f fps", len(frames), len(off_frames), fps)
+
+    # Create PassData
+    session_dir = Path(on_axis_path).parent
+    data = PassData(
+        session_dir=session_dir,
+        on_frames=frames,
+        off_frames=off_frames,
+        fps=fps,
+        on_depth=depth_maps,
+        off_depth=off_depth,
+        stereo_calib=stereo_calibration,
+        on_calib=on_calibration,
+        off_calib=off_calibration,
+    )
+
+    # Pass 1: SAM2 segmentation
+    t0 = time.monotonic()
+    try:
+        used_fallback = pass1_sam2.run(data, on_progress=on_progress)
+        if used_fallback:
+            warnings.append(
+                "SAM2 used auto-detected tip positions (tip_init.json not found). "
+                "For best results, confirm tip positions via the Initialize Tips page."
+            )
+    except Exception as exc:
+        logger.warning("Pass 1 (SAM2) failed: %s", exc, exc_info=True)
+        warnings.append(f"Pass 1 (SAM2) failed: {exc}")
+    timings["pass1_sam2"] = time.monotonic() - t0
+    logger.info("Pass 1 timing: %.1fs", timings["pass1_sam2"])
+
+    # Pass 2: CoTracker point refinement
+    t0 = time.monotonic()
+    try:
+        pass2_cotracker.run(data, on_progress=on_progress)
+    except Exception as exc:
+        logger.warning("Pass 2 (CoTracker) failed: %s", exc, exc_info=True)
+        warnings.append(f"Pass 2 (CoTracker) failed: {exc}")
+    timings["pass2_cotracker"] = time.monotonic() - t0
+    logger.info("Pass 2 timing: %.1fs", timings["pass2_cotracker"])
+
+    # Pass 3: Adaptive color gap filling (CPU)
+    t0 = time.monotonic()
+    try:
+        pass3_color.run(data, on_progress=on_progress)
+    except Exception as exc:
+        logger.warning("Pass 3 (Color) failed: %s", exc, exc_info=True)
+        warnings.append(f"Pass 3 (Color) failed: {exc}")
+    timings["pass3_color"] = time.monotonic() - t0
+    logger.info("Pass 3 timing: %.1fs", timings["pass3_color"])
+
+    # Pass 4: Stereo triangulation (CPU)
+    t0 = time.monotonic()
+    try:
+        pass4_triangulation.run(data, on_progress=on_progress)
+    except Exception as exc:
+        logger.warning("Pass 4 (Triangulation) failed: %s", exc, exc_info=True)
+        warnings.append(f"Pass 4 (Triangulation) failed: {exc}")
+    timings["pass4_triangulation"] = time.monotonic() - t0
+    logger.info("Pass 4 timing: %.1fs", timings["pass4_triangulation"])
+
+    # Pass 5: RTS smoothing (CPU)
+    t0 = time.monotonic()
+    try:
+        pass5_smoothing.run(data, on_progress=on_progress)
+    except Exception as exc:
+        logger.warning("Pass 5 (Smoothing) failed: %s", exc, exc_info=True)
+        warnings.append(f"Pass 5 (Smoothing) failed: {exc}")
+    timings["pass5_smoothing"] = time.monotonic() - t0
+    logger.info("Pass 5 timing: %.1fs", timings["pass5_smoothing"])
+
+    # Pass 6: Identity verification (CPU)
+    t0 = time.monotonic()
+    try:
+        pass6_identity.run(data, on_progress=on_progress)
+    except Exception as exc:
+        logger.warning("Pass 6 (Identity) failed: %s", exc, exc_info=True)
+        warnings.append(f"Pass 6 (Identity) failed: {exc}")
+    timings["pass6_identity"] = time.monotonic() - t0
+    logger.info("Pass 6 timing: %.1fs", timings["pass6_identity"])
+
+    # Render tracking overlay videos and CSVs
+    t0 = time.monotonic()
+    _progress("render_tracking", 0, 4, "Rendering tracking overlays")
+    tracking_videos: list[str] = []
+    tracking_csvs: list[str] = []
+    try:
+        on_detections = _tracks_to_detections(data.on_tracks, data.on_visibility)
+        off_detections = _tracks_to_detections(data.off_tracks, data.off_visibility)
+
+        if on_detections and frames:
+            _progress("render_tracking", 0, 4, "Rendering on-axis tracking video")
+            on_video_path = render_tracking_video(
+                frames, on_detections,
+                str(results_dir / "tracking_on_axis.mp4"), fps,
+            )
+            tracking_videos.append(on_video_path)
+
+        _progress("render_tracking", 1, 4, "Rendering off-axis tracking video")
+        if off_detections and off_frames:
+            off_video_path = render_tracking_video(
+                off_frames, off_detections,
+                str(results_dir / "tracking_off_axis.mp4"), fps,
+            )
+            tracking_videos.append(off_video_path)
+
+        _progress("render_tracking", 2, 4, "Writing detection CSVs")
+        if on_detections:
+            tracking_csvs.append(write_detection_csv(
+                on_detections, str(results_dir / "detections_on_axis.csv"), fps, "on_axis",
+            ))
+        if off_detections:
+            tracking_csvs.append(write_detection_csv(
+                off_detections, str(results_dir / "detections_off_axis.csv"), fps, "off_axis",
+            ))
+    except Exception as exc:
+        logger.warning("Tracking render failed: %s", exc, exc_info=True)
+        warnings.append(f"Tracking render failed: {exc}")
+    timings["render_tracking"] = time.monotonic() - t0
+    logger.info("Render tracking timing: %.1fs", timings["render_tracking"])
+    _progress("render_tracking", 4, 4, "Tracking render complete")
+
+    # Convert PassData to poses format for metrics calculation
+    # Use smoothed_3d if available, fall back to trajectories_3d
+    traj_source = data.smoothed_3d if data.smoothed_3d else data.trajectories_3d
+    labels = sorted(traj_source.keys())
+    n_frames = max((len(t) for t in traj_source.values()), default=0)
+
+    poses_3d: list[dict[str, Any]] = []
+    for fidx in range(n_frames):
+        timestamp = fidx / fps
+        pose: dict[str, Any] = {
+            "frame_idx": fidx,
+            "timestamp": round(timestamp, 6),
+        }
+        for label in labels:
+            traj = traj_source[label]
+            if fidx < len(traj) and not np.any(np.isnan(traj[fidx])):
+                pose[label] = [round(float(v), 6) for v in traj[fidx]]
+            else:
+                pose[label] = None
+        poses_3d.append(pose)
+
+    # Calculate metrics
+    _progress("calculate_metrics", 0, 1, "Calculating grading metrics")
+    metrics = calculate_metrics(poses_3d, fps)
+    logger.info("V2 Metrics: %s", metrics)
+
+    # Write pose CSV
+    try:
+        write_pose_csv(poses_3d, str(results_dir / "tracked_positions_world.csv"))
+    except Exception as exc:
+        logger.warning("Failed to write pose CSV: %s", exc, exc_info=True)
+    _progress("calculate_metrics", 1, 1, "Metrics complete")
+
+    # Build result
+    result: dict[str, Any] = {
+        "metrics": metrics,
+        "poses": poses_3d,
+        "pipeline_mode": "v2",
+        "timings": timings,
+        "tracking_videos": tracking_videos,
+        "tracking_csvs": tracking_csvs,
+    }
+    if data.swap_map:
+        warnings.append(f"Identity swap applied: {data.swap_map}")
+    if warnings:
+        result["warnings"] = warnings
+
+    total_time = sum(timings.values())
+    logger.info("V2 Pipeline complete in %.1fs — %s", total_time, timings)
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Dispatcher
+# ---------------------------------------------------------------------------
+
+
+def grade(job: dict, on_progress: ProgressCallback = None) -> dict[str, Any]:
+    """Run the grading pipeline, dispatching based on PIPELINE_MODE config.
+
+    Parameters
+    ----------
+    job : dict
+        Must contain ``session_id``, ``on_axis_path`` and ``off_axis_path``.
+    on_progress : callable, optional
+        ``(stage, current, total, detail)`` callback.
+
+    Returns
+    -------
+    dict
+        ``{"metrics": {...}, "poses": [...], ...}``
+    """
+    mode = PIPELINE_MODE
+    logger.info("Grading pipeline mode: %s", mode)
+
+    if mode == "v2":
+        return run_v2_pipeline(job, on_progress=on_progress)
+    else:
+        return run_pipeline(job, on_progress=on_progress)

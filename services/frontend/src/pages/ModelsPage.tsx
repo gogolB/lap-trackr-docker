@@ -23,6 +23,7 @@ function formatBytes(bytes: number | null): string {
 const TYPE_LABELS: Record<string, string> = {
   cotracker: "Point Tracking",
   yolo: "Detection",
+  sam2: "Segmentation",
 };
 
 function ProgressPoller({ modelId }: { modelId: string }) {

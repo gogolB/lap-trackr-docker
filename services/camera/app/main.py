@@ -73,6 +73,11 @@ class CameraConfigApply(BaseModel):
     on_axis_flip_v: bool = False
     off_axis_flip_h: bool = False
     off_axis_flip_v: bool = False
+    camera_fps: int = 60
+    on_axis_whitebalance_auto: bool = True
+    off_axis_whitebalance_auto: bool = True
+    on_axis_whitebalance_temperature: int = 4600
+    off_axis_whitebalance_temperature: int = 4600
 
 
 class RecordStartRequest(BaseModel):
@@ -155,7 +160,7 @@ def stream(camera_name: str, eye: str = "left"):
                     b"--frame\r\n"
                     b"Content-Type: image/jpeg\r\n\r\n" + frame + b"\r\n"
                 )
-            time.sleep(0.033)
+            time.sleep(manager.get_stream_interval_seconds(camera_name))
 
     return StreamingResponse(
         generate(),

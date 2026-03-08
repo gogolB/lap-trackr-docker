@@ -147,6 +147,11 @@ class CameraConfigOut(BaseModel):
     on_axis_flip_v: bool = False
     off_axis_flip_h: bool = False
     off_axis_flip_v: bool = False
+    camera_fps: int = 60
+    on_axis_whitebalance_auto: bool = True
+    off_axis_whitebalance_auto: bool = True
+    on_axis_whitebalance_temperature: int = 4600
+    off_axis_whitebalance_temperature: int = 4600
     updated_at: datetime | None = None
 
     model_config = {"from_attributes": True}
@@ -163,6 +168,11 @@ class CameraConfigUpdate(BaseModel):
     on_axis_flip_v: bool | None = None
     off_axis_flip_h: bool | None = None
     off_axis_flip_v: bool | None = None
+    camera_fps: int | None = None
+    on_axis_whitebalance_auto: bool | None = None
+    off_axis_whitebalance_auto: bool | None = None
+    on_axis_whitebalance_temperature: int | None = None
+    off_axis_whitebalance_temperature: int | None = None
 
 
 # ── ML Models ───────────────────────────────────────────────────────

@@ -11,16 +11,18 @@ import numpy as np
 
 logger = logging.getLogger("grader.color_detector")
 
-# HSV ranges for instrument tape colors
+# HSV ranges for instrument tape colors (OpenCV 0-180 H scale)
+# Corrected from 360° scale: Green H∈[168.4°–180.7°] → ~84–90,
+# Pink H≈264.5° → ~132
 _COLOR_RANGES = {
     "green": {
-        "lower": np.array([35, 50, 50]),
-        "upper": np.array([85, 255, 255]),
+        "lower": np.array([80, 30, 50]),
+        "upper": np.array([95, 255, 255]),
         "label": "green_tip",
     },
     "pink": {
-        "lower": np.array([140, 50, 50]),
-        "upper": np.array([175, 255, 255]),
+        "lower": np.array([125, 25, 50]),
+        "upper": np.array([145, 255, 255]),
         "label": "pink_tip",
     },
 }

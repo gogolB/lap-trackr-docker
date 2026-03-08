@@ -287,7 +287,7 @@ Restart the API: `docker compose restart api`
 
 - Check GPU utilization: `tegrastats` (on Jetson) or `nvidia-smi`
 - Consider using `FRAME_SAMPLE_INTERVAL` > 5 to process fewer frames
-- Use a lighter model (YOLOv8n vs SAM2 large)
+- Use a lighter SAM2 checkpoint or disable auxiliary support models for the run
 
 ### Slow MJPEG streams
 

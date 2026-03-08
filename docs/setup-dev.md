@@ -220,9 +220,77 @@ docker compose up -d
 
 This gives you:
 - Mock camera streams (no ZED SDK needed)
-- Real ML inference on your GPU (YOLO, CoTracker, SAM2, TAPIR)
+- Real ML inference on your GPU (SAM2, CoTracker3, and optional YOLO support)
 - Software video encoding (no NVENC on desktop GPUs)
 - Synthetic SVO2 data (grader generates fake frames/depth for testing)
+
+## Offline Grading (No Docker / No Jetson)
+
+Process exported session videos on any workstation with a GPU — no Redis, PostgreSQL, Docker, or ZED SDK required.
+
+### Prerequisites
+
+- Python 3.10+
+- PyTorch with CUDA (Linux/Windows) or MPS (macOS)
+- SAM2 and CoTracker installed from source
+
+### Install
+
+```bash
+cd services/grader
+
+# Install PyTorch first (pick one):
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124  # CUDA 12.4
+pip install torch torchvision  # macOS MPS
+
+# Install grader dependencies
+pip install -r requirements.offline.txt
+
+# Install ML model packages
+pip install git+https://github.com/facebookresearch/sam2.git
+pip install git+https://github.com/facebookresearch/co-tracker.git
+```
+
+### Download Models
+
+Download the SAM2 checkpoint (`sam2.1_hiera_large.pt`) from the [SAM2 releases](https://github.com/facebookresearch/sam2/releases).
+
+Download the CoTracker checkpoint from the [CoTracker releases](https://github.com/facebookresearch/co-tracker/releases).
+
+### Copy Session Data from Jetson
+
+From the Jetson, copy the session directory to your workstation:
+
+```bash
+scp -r enmed@jetson:/data/users/<user_id>/<session_dir> ./my_session
+```
+
+The directory should contain:
+- `on_axis_left.mp4`, `off_axis_left.mp4` (exported video)
+- `on_axis_depth.npz`, `off_axis_depth.npz` (depth maps)
+- `tip_init.json` or `tip_detections.json` (instrument tip positions)
+
+### Run
+
+```bash
+cd services/grader
+
+python -m app.grade_offline ./my_session \
+    --sam2-model /path/to/sam2.1_hiera_large.pt \
+    --cotracker-model /path/to/cotracker_v3.pth \
+    --device cuda
+```
+
+Options:
+- `--device cuda|mps|cpu` — compute device (auto-detected if omitted)
+- `--sample-interval N` — process every Nth frame (default: 1 = all frames)
+- `--sam2-config NAME` — SAM2 Hydra config name (default: `configs/sam2.1/sam2.1_hiera_l.yaml`)
+
+Results are written to `<session_dir>/results/`:
+- `metrics.json`, `poses.json`, `timings.json`
+- `tracking_on_axis.mp4`, `tracking_off_axis.mp4`
+- `detections_on_axis.csv`, `detections_off_axis.csv`
+- `tracked_positions_world.csv`
 
 ## Frontend Development with Hot Reload
 

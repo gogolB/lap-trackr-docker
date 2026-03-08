@@ -52,6 +52,22 @@ class CameraManager:
         self._rotation: dict[str, int] = {"on_axis": 0, "off_axis": 0}
         self._flip_h: dict[str, bool] = {"on_axis": False, "off_axis": False}
         self._flip_v: dict[str, bool] = {"on_axis": False, "off_axis": False}
+        self._camera_fps_target: int = self._sanitize_camera_fps(
+            getattr(config, "CAMERA_TARGET_FPS_DEFAULT", 60)
+        )
+        self._camera_fps_actual: dict[str, int] = {
+            "on_axis": self._camera_fps_target,
+            "off_axis": self._camera_fps_target,
+        }
+        self._whitebalance_auto: dict[str, bool] = {"on_axis": True, "off_axis": True}
+        self._whitebalance_temperature: dict[str, int] = {
+            "on_axis": self._sanitize_whitebalance_temperature(
+                getattr(config, "WHITEBALANCE_TEMPERATURE_DEFAULT", 4600)
+            ),
+            "off_axis": self._sanitize_whitebalance_temperature(
+                getattr(config, "WHITEBALANCE_TEMPERATURE_DEFAULT", 4600)
+            ),
+        }
 
         # Grab-thread control
         self._grab_thread: threading.Thread | None = None
@@ -119,6 +135,29 @@ class CameraManager:
             "on_axis": config.get("on_axis_flip_v", False),
             "off_axis": config.get("off_axis_flip_v", False),
         }
+        new_camera_fps = self._sanitize_camera_fps(
+            config.get("camera_fps", self._camera_fps_target)
+        )
+        fps_changed = new_camera_fps != self._camera_fps_target
+        self._camera_fps_target = new_camera_fps
+        self._whitebalance_auto = {
+            "on_axis": bool(config.get("on_axis_whitebalance_auto", True)),
+            "off_axis": bool(config.get("off_axis_whitebalance_auto", True)),
+        }
+        self._whitebalance_temperature = {
+            "on_axis": self._sanitize_whitebalance_temperature(
+                config.get(
+                    "on_axis_whitebalance_temperature",
+                    self._whitebalance_temperature.get("on_axis", 4600),
+                )
+            ),
+            "off_axis": self._sanitize_whitebalance_temperature(
+                config.get(
+                    "off_axis_whitebalance_temperature",
+                    self._whitebalance_temperature.get("off_axis", 4600),
+                )
+            ),
+        }
 
         new_on = config.get("on_axis_serial", "")
         new_off = config.get("off_axis_serial", "")
@@ -128,16 +167,40 @@ class CameraManager:
             and (new_on != self.serials.get("on_axis") or new_off != self.serials.get("off_axis"))
         )
 
+        needs_reopen = serials_changed or fps_changed
         if serials_changed and not self.recording:
-            print(f"[camera_manager] Serial change detected, re-opening cameras")
-            self.close()
             self.serials["on_axis"] = new_on
             self.serials["off_axis"] = new_off
+
+        if needs_reopen and not self.recording:
+            reasons: list[str] = []
+            if serials_changed:
+                reasons.append("serials")
+            if fps_changed:
+                reasons.append(f"fps={self._camera_fps_target}")
+            print(
+                f"[camera_manager] Re-opening cameras due to config change: {', '.join(reasons)}"
+            )
+            self.close()
             self.open_cameras()
+        elif fps_changed and self.recording:
+            print(
+                f"[camera_manager] FPS change to {self._camera_fps_target} saved; "
+                "will apply after recording stops"
+            )
+        elif serials_changed and self.recording:
+            print(
+                "[camera_manager] Serial changes saved; "
+                "will apply after recording stops"
+            )
+        else:
+            self._apply_runtime_settings_all()
 
         print(
             f"[camera_manager] Config applied: swap_eyes={self._swap_eyes}, "
-            f"rotation={self._rotation}, flip_h={self._flip_h}, flip_v={self._flip_v}"
+            f"rotation={self._rotation}, flip_h={self._flip_h}, flip_v={self._flip_v}, "
+            f"camera_fps={self._camera_fps_target}, wb_auto={self._whitebalance_auto}, "
+            f"wb_temp={self._whitebalance_temperature}"
         )
 
     # ------------------------------------------------------------------
@@ -355,6 +418,14 @@ class CameraManager:
             "zed_sdk_version": sdk_version,
         }
 
+    def get_stream_interval_seconds(self, camera_name: str) -> float:
+        fps = self._camera_fps_actual.get(camera_name) or self._camera_info.get(camera_name, {}).get("fps") or self._camera_fps_target
+        try:
+            fps_value = max(1, int(fps))
+        except Exception:
+            fps_value = 30
+        return 1.0 / fps_value
+
     def capture_calibration_frame(self, camera_name: str) -> tuple[bytes | None, "np.ndarray | None"]:
         """Grab a single frame and return (jpeg_bytes, bgr_numpy_array).
 
@@ -428,6 +499,7 @@ class CameraManager:
             cameras_info[name] = {
                 "serial": serial,
                 "opened": opened,
+                "fps": self._camera_fps_actual.get(name, self._camera_fps_target),
             }
         return {
             "recording": self.recording,
@@ -476,6 +548,67 @@ class CameraManager:
         for cam in self.cameras.values():
             cam.disable_recording()
 
+    @staticmethod
+    def _sanitize_camera_fps(value: object) -> int:
+        try:
+            fps = int(value)
+        except Exception:
+            fps = 60
+        if fps >= 60:
+            return 60
+        if fps >= 30:
+            return 30
+        return 15
+
+    @staticmethod
+    def _sanitize_whitebalance_temperature(value: object) -> int:
+        try:
+            temperature = int(value)
+        except Exception:
+            temperature = 4600
+        return max(2800, min(6500, temperature))
+
+    def _apply_runtime_settings_all(self) -> None:
+        for name in list(self.cameras.keys()):
+            self._apply_runtime_settings(name)
+
+    def _apply_runtime_settings(self, camera_name: str) -> None:
+        cam = self.cameras.get(camera_name)
+        lock = self._locks.get(camera_name)
+        if cam is None or lock is None:
+            return
+
+        auto_enum = getattr(sl.VIDEO_SETTINGS, "WHITEBALANCE_AUTO", None)
+        temp_enum = getattr(sl.VIDEO_SETTINGS, "WHITEBALANCE_TEMPERATURE", None)
+        if auto_enum is None or temp_enum is None:
+            return
+
+        with lock:
+            auto_enabled = self._whitebalance_auto.get(camera_name, True)
+            auto_err = cam.set_camera_settings(auto_enum, 1 if auto_enabled else 0)
+            if auto_err != sl.ERROR_CODE.SUCCESS:
+                print(
+                    f"[camera_manager] Failed to set white balance auto on {camera_name}: "
+                    f"{auto_err}"
+                )
+                return
+            if not auto_enabled:
+                temp = self._whitebalance_temperature.get(camera_name, 4600)
+                temp_err = cam.set_camera_settings(temp_enum, int(temp))
+                if temp_err != sl.ERROR_CODE.SUCCESS:
+                    print(
+                        f"[camera_manager] Failed to set white balance temperature on "
+                        f"{camera_name}: {temp_err}"
+                    )
+                    return
+        if auto_enabled:
+            print(f"[camera_manager] {camera_name} white balance: auto")
+        else:
+            print(
+                f"[camera_manager] {camera_name} white balance: "
+                f"{self._whitebalance_temperature.get(camera_name, 4600)}K"
+            )
+
     def _missing_serials(self) -> dict[str, str]:
         missing: dict[str, str] = {}
         for name, serial in self.serials.items():
@@ -502,22 +635,42 @@ class CameraManager:
             self._open_single_camera(name, serial)
 
     def _open_single_camera(self, name: str, serial: str) -> None:
-        cam = sl.Camera()
-        init_params = sl.InitParameters()
-        init_params.camera_resolution = sl.RESOLUTION.HD1200
-        init_params.camera_fps = 30
-        init_params.depth_mode = sl.DEPTH_MODE.NONE
-        init_params.set_from_serial_number(int(serial))
-        status = cam.open(init_params)
-        if status != sl.ERROR_CODE.SUCCESS:
+        requested_fps = self._sanitize_camera_fps(self._camera_fps_target)
+        attempt_fps = [requested_fps]
+        if requested_fps == 60:
+            attempt_fps.append(30)
+        elif requested_fps == 30:
+            attempt_fps.append(15)
+
+        cam: sl.Camera | None = None
+        actual_fps: int | None = None
+        for fps in attempt_fps:
+            cam = sl.Camera()
+            init_params = sl.InitParameters()
+            init_params.camera_resolution = sl.RESOLUTION.HD1200
+            init_params.camera_fps = fps
+            init_params.depth_mode = sl.DEPTH_MODE.NONE
+            init_params.set_from_serial_number(int(serial))
+            status = cam.open(init_params)
+            if status == sl.ERROR_CODE.SUCCESS:
+                actual_fps = fps
+                if fps != requested_fps:
+                    print(
+                        f"[camera_manager] {name} requested {requested_fps} FPS but opened at "
+                        f"{fps} FPS instead"
+                    )
+                break
             print(
-                f"[camera_manager] Failed to open {name} "
+                f"[camera_manager] Failed to open {name} at {fps} FPS "
                 f"(serial {serial}): {status}"
             )
             try:
                 cam.close()
             except Exception:
                 pass
+            cam = None
+
+        if cam is None or actual_fps is None:
             return
 
         try:
@@ -526,6 +679,7 @@ class CameraManager:
                 self._locks[name] = threading.Lock()
                 self._latest_images[name] = sl.Mat()
                 self._streaming_mats[name] = sl.Mat()
+            self._camera_fps_actual[name] = actual_fps
 
             # Extract factory-calibrated intrinsics from the ZED SDK
             try:
@@ -544,8 +698,11 @@ class CameraManager:
                 self._camera_info[name] = {
                     "serial": serial,
                     "resolution": [int(res.width), int(res.height)],
-                    "fps": 30,
+                    "fps": int(cam_info.camera_configuration.fps or actual_fps),
                 }
+                self._camera_fps_actual[name] = int(
+                    cam_info.camera_configuration.fps or actual_fps
+                )
                 print(
                     f"[camera_manager] {name} intrinsics: "
                     f"left=({left.fx:.1f}, {left.fy:.1f}, {left.cx:.1f}, {left.cy:.1f}) "
@@ -555,6 +712,7 @@ class CameraManager:
             except Exception as exc:
                 print(f"[camera_manager] Warning: could not extract intrinsics for {name}: {exc}")
 
+            self._apply_runtime_settings(name)
             print(f"[camera_manager] Opened {name} (serial {serial})")
         except Exception as exc:
             print(f"[camera_manager] Error setting up {name}, closing: {exc}")
