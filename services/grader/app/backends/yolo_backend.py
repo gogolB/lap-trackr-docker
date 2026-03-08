@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 
@@ -25,13 +25,19 @@ class YOLOBackend(ModelBackend):
         self._model = YOLO(path)
         logger.info("YOLO model loaded")
 
-    def detect(self, frames: list[np.ndarray], query_points: np.ndarray | None = None) -> list[list[Detection]]:
+    def detect(
+        self,
+        frames: list[np.ndarray],
+        query_points: np.ndarray | None = None,
+        on_progress: Callable[[int, int], None] | None = None,
+    ) -> list[list[Detection]]:
         if not frames or self._model is None:
             return [[] for _ in frames]
 
         all_detections: list[list[Detection]] = []
 
-        for frame in frames:
+        total = len(frames)
+        for idx, frame in enumerate(frames, start=1):
             results = self._model(frame, verbose=False)
             detections: list[Detection] = []
 
@@ -68,6 +74,8 @@ class YOLOBackend(ModelBackend):
                 ]
 
             all_detections.append(tip_detections)
+            if on_progress and (idx == total or idx % 10 == 0):
+                on_progress(idx, total)
 
         logger.info("YOLO detections for %d frames", len(frames))
         return all_detections

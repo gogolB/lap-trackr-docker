@@ -8,7 +8,7 @@ positions and visibility scores.
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 
@@ -52,6 +52,7 @@ class CoTrackerBackend(ModelBackend):
         self,
         frames: list[np.ndarray],
         query_points: np.ndarray | None = None,
+        on_progress: Callable[[int, int], None] | None = None,
     ) -> list[list[Detection]]:
         """Track instrument tips across frames using query points.
 
@@ -123,6 +124,9 @@ class CoTrackerBackend(ModelBackend):
                             )
                         )
                 all_detections.append(detections)
+                current = t + 1
+                if on_progress and (current == tracks.shape[0] or current % 10 == 0):
+                    on_progress(current, tracks.shape[0])
 
             logger.info(
                 "Co-Tracker v2: tracked %d points across %d frames",

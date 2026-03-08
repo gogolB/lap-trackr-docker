@@ -103,6 +103,7 @@ class GradingResult(Base):
         DateTime(timezone=True), nullable=True
     )
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    warnings: Mapped[list | None] = mapped_column(JSONB, nullable=True)
 
     session: Mapped["Session"] = relationship("Session", back_populates="grading_result")
 
@@ -193,8 +194,12 @@ class CameraConfig(Base):
     off_axis_serial: Mapped[str] = mapped_column(String(32), nullable=False)
     on_axis_swap_eyes: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     off_axis_swap_eyes: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
-    on_axis_flip: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
-    off_axis_flip: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    on_axis_rotation: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    off_axis_rotation: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    on_axis_flip_h: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    on_axis_flip_v: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    off_axis_flip_h: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    off_axis_flip_v: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     updated_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),

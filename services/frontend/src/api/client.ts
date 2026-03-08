@@ -170,6 +170,21 @@ export interface JobProgress {
   total: number;
   percent: number;
   detail: string;
+  updated_at?: number | null;
+  stage_started_at?: number | null;
+  stages?: Record<
+    string,
+    {
+      stage: string;
+      current: number;
+      total: number;
+      percent: number;
+      detail: string;
+      status: string;
+      updated_at: number;
+      started_at: number;
+    }
+  >;
 }
 
 export async function getSessionProgress(id: string): Promise<JobProgress> {
@@ -212,6 +227,18 @@ export async function gradeSession(id: string): Promise<Session> {
   });
 }
 
+export async function retrySession(id: string): Promise<Session> {
+  return request<Session>(`/api/sessions/${id}/retry`, {
+    method: "POST",
+  });
+}
+
+export async function reExportSession(id: string): Promise<Session> {
+  return request<Session>(`/api/sessions/${id}/re-export`, {
+    method: "POST",
+  });
+}
+
 export interface GradingResult {
   id: string;
   session_id: string;
@@ -223,6 +250,7 @@ export interface GradingResult {
   total_time: number | null;
   completed_at: string | null;
   error: string | null;
+  warnings: string[] | null;
 }
 
 export async function getResults(sessionId: string): Promise<GradingResult> {
@@ -549,8 +577,12 @@ export interface CameraConfig {
   off_axis_serial: string;
   on_axis_swap_eyes: boolean;
   off_axis_swap_eyes: boolean;
-  on_axis_flip: boolean;
-  off_axis_flip: boolean;
+  on_axis_rotation: number;
+  off_axis_rotation: number;
+  on_axis_flip_h: boolean;
+  on_axis_flip_v: boolean;
+  off_axis_flip_h: boolean;
+  off_axis_flip_v: boolean;
   updated_at: string | null;
 }
 
@@ -559,8 +591,12 @@ export interface CameraConfigUpdate {
   off_axis_serial?: string;
   on_axis_swap_eyes?: boolean;
   off_axis_swap_eyes?: boolean;
-  on_axis_flip?: boolean;
-  off_axis_flip?: boolean;
+  on_axis_rotation?: number;
+  off_axis_rotation?: number;
+  on_axis_flip_h?: boolean;
+  on_axis_flip_v?: boolean;
+  off_axis_flip_h?: boolean;
+  off_axis_flip_v?: boolean;
 }
 
 export async function getCameraConfig(): Promise<CameraConfig> {

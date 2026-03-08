@@ -7,7 +7,7 @@ tip centroids from the mask contours.
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 
@@ -37,7 +37,12 @@ class SAM2Backend(ModelBackend):
             logger.error("Failed to load SAM 2: %s", exc)
             raise
 
-    def detect(self, frames: list[np.ndarray], query_points: np.ndarray | None = None) -> list[list[Detection]]:
+    def detect(
+        self,
+        frames: list[np.ndarray],
+        query_points: np.ndarray | None = None,
+        on_progress: Callable[[int, int], None] | None = None,
+    ) -> list[list[Detection]]:
         """Segment instruments and derive tip positions from mask extrema.
 
         Falls back to empty detections if inference fails.
@@ -49,7 +54,8 @@ class SAM2Backend(ModelBackend):
             import torch
 
             all_detections: list[list[Detection]] = []
-            for frame in frames:
+            total = len(frames)
+            for idx, frame in enumerate(frames, start=1):
                 # Convert to tensor: (1, 3, H, W)
                 tensor = torch.from_numpy(frame).permute(2, 0, 1).unsqueeze(0).float()
                 if torch.cuda.is_available():
@@ -65,6 +71,8 @@ class SAM2Backend(ModelBackend):
                     detections = []
 
                 all_detections.append(detections)
+                if on_progress and (idx == total or idx % 10 == 0):
+                    on_progress(idx, total)
 
             logger.info("SAM 2 detections for %d frames", len(frames))
             return all_detections

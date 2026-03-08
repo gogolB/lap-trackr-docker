@@ -198,11 +198,25 @@ export default function LiveView() {
       // Use on_axis capture count as representative
       setCaptures(result.on_axis.total_captures);
       if (!result.on_axis.success && !result.off_axis.success) {
-        setCalibError("No ChArUco corners detected on either camera. Adjust the board position.");
+        const totalMarkers =
+          result.on_axis.markers_detected + result.off_axis.markers_detected;
+        setCalibError(
+          totalMarkers > 0
+            ? "Markers were detected, but neither camera produced enough ChArUco corners. Bring the board closer and verify the selected eye/rotation."
+            : "No ArUco markers detected on either camera. Verify the board dictionary and adjust the board position."
+        );
       } else if (!result.on_axis.success) {
-        setCalibError("No corners detected on on-axis camera.");
+        setCalibError(
+          result.on_axis.markers_detected > 0
+            ? `On-axis camera found ${result.on_axis.markers_detected} markers but not enough ChArUco corners.`
+            : "No ArUco markers detected on on-axis camera."
+        );
       } else if (!result.off_axis.success) {
-        setCalibError("No corners detected on off-axis camera.");
+        setCalibError(
+          result.off_axis.markers_detected > 0
+            ? `Off-axis camera found ${result.off_axis.markers_detected} markers but not enough ChArUco corners.`
+            : "No ArUco markers detected on off-axis camera."
+        );
       }
     } catch (err) {
       setCalibError(
@@ -631,10 +645,14 @@ export default function LiveView() {
                       {cam.replace("_", " ")}
                       {cap.success ? (
                         <span className="ml-2 text-emerald-400">
-                          {cap.charuco_corners} corners ({cap.coverage_pct}%)
+                          {cap.markers_detected} markers, {cap.charuco_corners} corners ({cap.coverage_pct}%)
                         </span>
                       ) : (
-                        <span className="ml-2 text-red-400">No corners</span>
+                        <span className="ml-2 text-red-400">
+                          {cap.markers_detected > 0
+                            ? `${cap.markers_detected} markers, 0 corners`
+                            : "0 markers, 0 corners"}
+                        </span>
                       )}
                     </h4>
                     {cap.preview_jpeg_b64 && (

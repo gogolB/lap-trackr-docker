@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from typing import Callable
 
 import numpy as np
 
@@ -17,14 +18,20 @@ class PlaceholderBackend(ModelBackend):
     def load(self, path: str) -> None:
         logger.info("Placeholder backend loaded (no model file needed)")
 
-    def detect(self, frames: list[np.ndarray], query_points: np.ndarray | None = None) -> list[list[Detection]]:
+    def detect(
+        self,
+        frames: list[np.ndarray],
+        query_points: np.ndarray | None = None,
+        on_progress: Callable[[int, int], None] | None = None,
+    ) -> list[list[Detection]]:
         if not frames:
             return []
 
         height, width = frames[0].shape[:2]
         all_detections: list[list[Detection]] = []
 
-        for frame_idx in range(len(frames)):
+        total = len(frames)
+        for frame_idx in range(total):
             rng = np.random.RandomState(seed=frame_idx)
             margin_x = width * 0.2
             margin_y = height * 0.2
@@ -49,6 +56,9 @@ class PlaceholderBackend(ModelBackend):
                 ),
             ]
             all_detections.append(detections)
+            current = frame_idx + 1
+            if on_progress and (current == total or current % 10 == 0):
+                on_progress(current, total)
 
         logger.info("Placeholder detections for %d frames", len(frames))
         return all_detections

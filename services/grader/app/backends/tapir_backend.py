@@ -7,7 +7,7 @@ temporal Refinement) tracks query points across video sequences.
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 
@@ -34,7 +34,12 @@ class TAPIRBackend(ModelBackend):
             logger.error("Failed to load TAPIR: %s", exc)
             raise
 
-    def detect(self, frames: list[np.ndarray], query_points: np.ndarray | None = None) -> list[list[Detection]]:
+    def detect(
+        self,
+        frames: list[np.ndarray],
+        query_points: np.ndarray | None = None,
+        on_progress: Callable[[int, int], None] | None = None,
+    ) -> list[list[Detection]]:
         """Track instrument tips across frames using TAPIR.
 
         Initializes query points at the center of the first frame and tracks
@@ -91,6 +96,9 @@ class TAPIRBackend(ModelBackend):
                             label=label,
                         ))
                 all_detections.append(detections)
+                current = t + 1
+                if on_progress and (current == tracks.shape[0] or current % 10 == 0):
+                    on_progress(current, tracks.shape[0])
 
             logger.info("TAPIR detections for %d frames", len(frames))
             return all_detections

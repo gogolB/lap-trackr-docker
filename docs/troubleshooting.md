@@ -95,10 +95,15 @@ The export worker may have crashed or the job was lost.
 docker compose logs exporter
 
 # The API's periodic sweep will mark it as export_failed after 30 minutes.
-# Or manually retry:
+# You can also re-export or retry manually:
+curl -X POST http://localhost/api/sessions/{id}/re-export \
+  -H "Authorization: Bearer $TOKEN"
+
 curl -X POST http://localhost/api/sessions/{id}/retry \
   -H "Authorization: Bearer $TOKEN"
 ```
+
+If the UI shows progress stuck on one camera, check `GET /api/sessions/{id}/progress` or the exporter logs. Export now tracks `export_on_axis`, `export_off_axis`, and `detect_tips` separately.
 
 ### Session stuck in "grading"
 
@@ -157,8 +162,49 @@ docker compose up -d
 ### Run migrations manually
 
 ```bash
-docker compose exec api alembic upgrade head
+docker compose exec api sh -lc 'cd /app && alembic upgrade head'
 ```
+
+Normally this is not required. The API runs Alembic automatically on startup. If you added a migration or repaired schema drift, restarting the API is usually enough:
+
+```bash
+docker compose restart api
+```
+
+### Check the current migration revision
+
+```bash
+docker compose exec api sh -lc 'cd /app && alembic current && printf "\\n---\\n" && alembic heads'
+```
+
+### Enum value missing after a deploy
+
+Symptoms include errors like:
+
+```text
+invalid input value for enum sessionstatus: "awaiting_init"
+```
+
+That means the live DB schema drifted from the expected migration history.
+
+Checks:
+
+```bash
+docker compose exec db psql -U laptrackr -d laptrackr -c "SELECT version_num FROM alembic_version;"
+docker compose exec db psql -U laptrackr -d laptrackr -c "
+  SELECT e.enumlabel
+  FROM pg_type t
+  JOIN pg_enum e ON t.oid = e.enumtypid
+  WHERE t.typname = 'sessionstatus'
+  ORDER BY e.enumsortorder;
+"
+```
+
+Fix:
+
+1. ensure the latest migration files are present in the API image
+2. restart the API or run `alembic upgrade head`
+3. if the DB revision says it is current but the schema is missing pieces, add a new forward repair migration instead of editing old revisions
 
 ### Check database size
 

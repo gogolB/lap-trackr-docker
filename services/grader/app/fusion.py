@@ -15,6 +15,10 @@ from app.pose_estimator import _lookup_depth, _pixel_to_3d, _transform_point
 logger = logging.getLogger("grader.fusion")
 
 
+class StereoFusionError(Exception):
+    """Raised when stereo fusion cannot proceed (e.g. singular extrinsic matrix)."""
+
+
 def _triangulate_point(
     pt_on: tuple[float, float],
     pt_off: tuple[float, float],
@@ -83,8 +87,7 @@ def fuse_dual_camera(
     try:
         T_off_to_on = np.linalg.inv(T_on_to_off)
     except np.linalg.LinAlgError:
-        logger.error("Singular extrinsic matrix T_on_to_off, cannot fuse cameras")
-        return []
+        raise StereoFusionError("Singular extrinsic matrix T_on_to_off, cannot fuse cameras")
 
     K_on = _build_K(on_calib)
     K_off = _build_K(off_calib)

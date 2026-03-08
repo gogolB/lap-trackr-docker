@@ -27,7 +27,7 @@ from sqlalchemy import (
     create_engine,
     text,
 )
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.engine import Engine
 
 from app.config import DATA_DIR, DATABASE_URL
@@ -107,6 +107,7 @@ grading_results_table = Table(
     Column("total_time", Float, nullable=True),
     Column("completed_at", DateTime(timezone=True), nullable=True),
     Column("error", Text, nullable=True),
+    Column("warnings", JSONB, nullable=True),
 )
 
 
@@ -168,6 +169,7 @@ def save_results(session_id: str, results: dict[str, Any]) -> None:
 
     metrics: dict = results.get("metrics", {})
     poses: list = results.get("poses", [])
+    warnings: list | None = results.get("warnings") or None
     now = datetime.now(timezone.utc)
 
     engine = _get_engine()
@@ -189,6 +191,7 @@ def save_results(session_id: str, results: dict[str, Any]) -> None:
             "total_time": metrics.get("total_time"),
             "completed_at": now,
             "error": None,
+            "warnings": warnings,
         }
 
         if existing is not None:

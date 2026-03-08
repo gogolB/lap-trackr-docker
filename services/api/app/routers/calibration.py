@@ -30,7 +30,124 @@ def _validate_camera_name(camera_name: str) -> None:
 
 # ---------------------------------------------------------------------------
 # Proxy endpoints -- forward to camera service
+# NOTE: Literal "/stereo" routes MUST come before "/{camera_name}" routes
+# so FastAPI doesn't match "stereo" as a camera_name path parameter.
 # ---------------------------------------------------------------------------
+
+@router.post("/capture/stereo")
+async def capture_stereo_frame(
+    current_user: User = Depends(get_current_user),
+):
+    """Capture from both cameras simultaneously and detect ChArUco corners."""
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.post(f"{CAMERA_URL}/calibration/capture/stereo")
+            resp.raise_for_status()
+            return resp.json()
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(status_code=exc.response.status_code, detail=exc.response.text)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Camera service error: {exc}")
+
+
+@router.post("/compute/stereo")
+async def compute_stereo_calibration(
+    save_as_default: bool = True,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Compute stereo calibration (per-camera extrinsics + inter-camera transform)."""
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(f"{CAMERA_URL}/calibration/compute/stereo")
+            resp.raise_for_status()
+            stereo_data = resp.json()
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(status_code=exc.response.status_code, detail=exc.response.text)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Camera service error: {exc}")
+
+    default_dir = Path(settings.CALIBRATION_DIR) / "default"
+    await asyncio.to_thread(default_dir.mkdir, parents=True, exist_ok=True)
+
+    # Save per-camera calibration files and DB records in a single transaction
+    async with db.begin_nested():
+        for camera_name in ("on_axis", "off_axis"):
+            calibration_data = stereo_data[camera_name]
+            intrinsics = calibration_data["intrinsics"]
+            board_config = calibration_data["board_config"]
+            quality = calibration_data["quality"]
+            disto = intrinsics.get("distortion", [])
+
+            calibration_path = None
+            if save_as_default:
+                calibration_data["is_global"] = True
+                cal_file = default_dir / f"{camera_name}.json"
+                await asyncio.to_thread(cal_file.write_text, json.dumps(calibration_data, indent=2))
+                calibration_path = str(cal_file)
+
+                # Remove old default for this camera
+                old = await db.execute(
+                    select(Calibration).where(
+                        Calibration.camera_name == camera_name,
+                        Calibration.is_default == True,
+                    )
+                )
+                for row in old.scalars().all():
+                    await db.delete(row)
+                await db.flush()  # ensure deletes execute before new insert
+
+            cal = Calibration(
+                camera_name=camera_name,
+                is_default=save_as_default,
+                fx=intrinsics["fx"],
+                fy=intrinsics["fy"],
+                cx=intrinsics["cx"],
+                cy=intrinsics["cy"],
+                k1=disto[0] if len(disto) > 0 else None,
+                k2=disto[1] if len(disto) > 1 else None,
+                k3=disto[2] if len(disto) > 2 else None,
+                p1=disto[3] if len(disto) > 3 else None,
+                p2=disto[4] if len(disto) > 4 else None,
+                image_width=intrinsics["image_width"],
+                image_height=intrinsics["image_height"],
+                extrinsic_matrix=calibration_data.get("extrinsic_matrix"),
+                board_rows=board_config["rows"],
+                board_cols=board_config["cols"],
+                square_size_mm=board_config["square_size_mm"],
+                marker_size_mm=board_config["marker_size_mm"],
+                aruco_dict=board_config["aruco_dict"],
+                reprojection_error=quality.get("reprojection_error"),
+                num_frames_used=quality.get("num_frames_used"),
+                is_global=save_as_default,
+                calibration_path=calibration_path,
+            )
+            db.add(cal)
+
+    # Save stereo calibration JSON
+    if save_as_default:
+        stereo_file = default_dir / "stereo_calibration.json"
+        await asyncio.to_thread(stereo_file.write_text, json.dumps(stereo_data["stereo"], indent=2))
+
+    await db.commit()
+    return stereo_data
+
+
+@router.post("/reset/stereo")
+async def reset_stereo_calibration(
+    current_user: User = Depends(get_current_user),
+):
+    """Reset accumulated captures for both cameras."""
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.post(f"{CAMERA_URL}/calibration/reset/stereo")
+            resp.raise_for_status()
+            return resp.json()
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(status_code=exc.response.status_code, detail=exc.response.text)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Camera service error: {exc}")
+
 
 @router.post("/capture/{camera_name}", response_model=CalibrationCaptureResult)
 async def capture_frame(
@@ -85,120 +202,9 @@ async def compute_calibration(
         await asyncio.to_thread(cal_file.write_text, json.dumps(calibration_data, indent=2))
         calibration_path = str(cal_file)
 
-    # Remove old default for this camera if saving as default
-    if save_as_default:
-        old = await db.execute(
-            select(Calibration).where(
-                Calibration.camera_name == camera_name,
-                Calibration.is_default == True,
-            )
-        )
-        for row in old.scalars().all():
-            await db.delete(row)
-
-    # Persist to DB
-    cal = Calibration(
-        camera_name=camera_name,
-        is_default=save_as_default,
-        fx=intrinsics["fx"],
-        fy=intrinsics["fy"],
-        cx=intrinsics["cx"],
-        cy=intrinsics["cy"],
-        k1=disto[0] if len(disto) > 0 else None,
-        k2=disto[1] if len(disto) > 1 else None,
-        k3=disto[2] if len(disto) > 2 else None,
-        p1=disto[3] if len(disto) > 3 else None,
-        p2=disto[4] if len(disto) > 4 else None,
-        image_width=intrinsics["image_width"],
-        image_height=intrinsics["image_height"],
-        extrinsic_matrix=calibration_data.get("extrinsic_matrix"),
-        board_rows=board_config["rows"],
-        board_cols=board_config["cols"],
-        square_size_mm=board_config["square_size_mm"],
-        marker_size_mm=board_config["marker_size_mm"],
-        aruco_dict=board_config["aruco_dict"],
-        reprojection_error=quality.get("reprojection_error"),
-        num_frames_used=quality.get("num_frames_used"),
-        is_global=save_as_default,
-        calibration_path=calibration_path,
-    )
-    db.add(cal)
-    await db.commit()
-    await db.refresh(cal)
-
-    return calibration_data
-
-
-@router.post("/reset/{camera_name}")
-async def reset_calibration(
-    camera_name: str,
-    current_user: User = Depends(get_current_user),
-):
-    """Reset accumulated captures on the camera service."""
-    _validate_camera_name(camera_name)
-    try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            resp = await client.post(f"{CAMERA_URL}/calibration/reset/{camera_name}")
-            resp.raise_for_status()
-            return resp.json()
-    except httpx.HTTPStatusError as exc:
-        raise HTTPException(status_code=exc.response.status_code, detail=exc.response.text)
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"Camera service error: {exc}")
-
-
-@router.post("/capture/stereo")
-async def capture_stereo_frame(
-    current_user: User = Depends(get_current_user),
-):
-    """Capture from both cameras simultaneously and detect ChArUco corners."""
-    try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            resp = await client.post(f"{CAMERA_URL}/calibration/capture/stereo")
-            resp.raise_for_status()
-            return resp.json()
-    except httpx.HTTPStatusError as exc:
-        raise HTTPException(status_code=exc.response.status_code, detail=exc.response.text)
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"Camera service error: {exc}")
-
-
-@router.post("/compute/stereo")
-async def compute_stereo_calibration(
-    save_as_default: bool = True,
-    current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-):
-    """Compute stereo calibration (per-camera extrinsics + inter-camera transform)."""
-    try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.post(f"{CAMERA_URL}/calibration/compute/stereo")
-            resp.raise_for_status()
-            stereo_data = resp.json()
-    except httpx.HTTPStatusError as exc:
-        raise HTTPException(status_code=exc.response.status_code, detail=exc.response.text)
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"Camera service error: {exc}")
-
-    default_dir = Path(settings.CALIBRATION_DIR) / "default"
-    await asyncio.to_thread(default_dir.mkdir, parents=True, exist_ok=True)
-
-    # Save per-camera calibration files and DB records
-    for camera_name in ("on_axis", "off_axis"):
-        calibration_data = stereo_data[camera_name]
-        intrinsics = calibration_data["intrinsics"]
-        board_config = calibration_data["board_config"]
-        quality = calibration_data["quality"]
-        disto = intrinsics.get("distortion", [])
-
-        calibration_path = None
+    # Remove old default and persist new one in a single transaction
+    async with db.begin_nested():
         if save_as_default:
-            calibration_data["is_global"] = True
-            cal_file = default_dir / f"{camera_name}.json"
-            await asyncio.to_thread(cal_file.write_text, json.dumps(calibration_data, indent=2))
-            calibration_path = str(cal_file)
-
-            # Remove old default for this camera
             old = await db.execute(
                 select(Calibration).where(
                     Calibration.camera_name == camera_name,
@@ -235,23 +241,22 @@ async def compute_stereo_calibration(
         )
         db.add(cal)
 
-    # Save stereo calibration JSON
-    if save_as_default:
-        stereo_file = default_dir / "stereo_calibration.json"
-        await asyncio.to_thread(stereo_file.write_text, json.dumps(stereo_data["stereo"], indent=2))
-
     await db.commit()
-    return stereo_data
+    await db.refresh(cal)
+
+    return calibration_data
 
 
-@router.post("/reset/stereo")
-async def reset_stereo_calibration(
+@router.post("/reset/{camera_name}")
+async def reset_calibration(
+    camera_name: str,
     current_user: User = Depends(get_current_user),
 ):
-    """Reset accumulated captures for both cameras."""
+    """Reset accumulated captures on the camera service."""
+    _validate_camera_name(camera_name)
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
-            resp = await client.post(f"{CAMERA_URL}/calibration/reset/stereo")
+            resp = await client.post(f"{CAMERA_URL}/calibration/reset/{camera_name}")
             resp.raise_for_status()
             return resp.json()
     except httpx.HTTPStatusError as exc:

@@ -7,7 +7,7 @@ sampling every Nth frame to keep processing tractable.
 from __future__ import annotations
 
 import logging
-from typing import Tuple, List
+from typing import Callable, List, Tuple
 
 import numpy as np
 
@@ -19,6 +19,7 @@ logger = logging.getLogger("grader.svo_loader")
 def load_svo2(
     svo_path: str,
     sample_interval: int | None = None,
+    on_progress: Callable[[int, int], None] | None = None,
 ) -> Tuple[List[np.ndarray], List[np.ndarray], float]:
     """Open an SVO2 file and return sampled frames, depth maps, and FPS.
 
@@ -51,7 +52,11 @@ def load_svo2(
 
     if sl is None:
         # Try loading from exported MP4 + NPZ
-        export_result = _try_load_from_exports(svo_path, sample_interval)
+        export_result = _try_load_from_exports(
+            svo_path,
+            sample_interval,
+            on_progress=on_progress,
+        )
         if export_result is not None:
             return export_result
 
@@ -78,6 +83,9 @@ def load_svo2(
     fps: float = camera.get_camera_information().camera_configuration.fps
     if fps <= 0:
         fps = DEFAULT_FPS
+    total_frames = camera.get_svo_number_of_frames()
+    if total_frames <= 0:
+        total_frames = 0
 
     runtime = sl.RuntimeParameters()
     image_mat = sl.Mat()
@@ -100,7 +108,13 @@ def load_svo2(
             frames.append(np.array(image_mat.get_data()[:, :, :3], dtype=np.uint8))
             depth_maps.append(np.array(depth_mat.get_data(), dtype=np.float32))
 
+        current = frame_idx + 1
+        if on_progress and (current % 10 == 0 or current == total_frames):
+            on_progress(current, max(total_frames, current, 1))
         frame_idx += 1
+
+    if on_progress:
+        on_progress(frame_idx, max(total_frames, frame_idx, 1))
 
     camera.close()
     logger.info(
@@ -120,6 +134,7 @@ def load_svo2(
 def _try_load_from_exports(
     svo_path: str,
     sample_interval: int,
+    on_progress: Callable[[int, int], None] | None = None,
 ) -> Tuple[List[np.ndarray], List[np.ndarray], float] | None:
     """Try to load frames and depth from exported MP4 + NPZ files.
 
@@ -149,6 +164,9 @@ def _try_load_from_exports(
         fps = cap.get(cv2.CAP_PROP_FPS)
         if fps <= 0:
             fps = 30.0
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        if total_frames <= 0:
+            total_frames = 0
 
         # Load depth arrays
         depth_data = np.load(str(npz_path))
@@ -175,7 +193,13 @@ def _try_load_from_exports(
                     h, w = bgr.shape[:2]
                     depth_maps.append(np.zeros((h, w), dtype=np.float32))
 
+            current = frame_idx + 1
+            if on_progress and (current % 10 == 0 or current == total_frames):
+                on_progress(current, max(total_frames, current, 1))
             frame_idx += 1
+
+        if on_progress:
+            on_progress(frame_idx, max(total_frames, frame_idx, 1))
 
         logger.info(
             "Loaded %d / %d frames from exports (sample_interval=%d)",

@@ -25,6 +25,7 @@ logger = logging.getLogger("grader.worker")
 QUEUE_KEY = "grading_jobs"
 
 PROGRESS_KEY_PREFIX = "job_progress:"
+STAGE_FIELD_PREFIX = "stage__"
 PROGRESS_TTL = 3600
 
 
@@ -38,13 +39,40 @@ def _publish_progress(
 ) -> None:
     key = f"{PROGRESS_KEY_PREFIX}{session_id}"
     pct = round(current / total * 100, 1) if total > 0 else 0
+    now = time.time()
+    stage_field = f"{STAGE_FIELD_PREFIX}{stage}"
+    stage_status = "completed" if total > 0 and current >= total else "running"
+    raw_stage_data = redis_client.hget(key, stage_field)
+    stage_started_at = now
+    if raw_stage_data:
+        try:
+            parsed = json.loads(raw_stage_data)
+            if current > 0 and parsed.get("started_at") is not None:
+                stage_started_at = float(parsed["started_at"])
+        except (TypeError, ValueError, json.JSONDecodeError):
+            stage_started_at = now
+
+    stage_payload = json.dumps(
+        {
+            "stage": stage,
+            "current": current,
+            "total": total,
+            "percent": pct,
+            "detail": detail,
+            "status": stage_status,
+            "updated_at": now,
+            "started_at": stage_started_at,
+        }
+    )
     redis_client.hset(key, mapping={
         "stage": stage,
         "current": str(current),
         "total": str(total),
         "percent": str(pct),
         "detail": detail,
-        "updated_at": str(time.time()),
+        "updated_at": str(now),
+        "stage_started_at": str(stage_started_at),
+        stage_field: stage_payload,
     })
     redis_client.expire(key, PROGRESS_TTL)
 

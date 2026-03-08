@@ -42,13 +42,16 @@ class CameraManager:
 
         # ZED SDK intrinsics extracted at open time
         self._intrinsics: dict[str, dict] = {}
+        self._intrinsics_by_eye: dict[str, dict[str, dict]] = {}
 
         # Camera info (resolution, fps) extracted at open time
         self._camera_info: dict[str, dict] = {}
 
         # Camera config flags
         self._swap_eyes: dict[str, bool] = {"on_axis": False, "off_axis": False}
-        self._flip: dict[str, bool] = {"on_axis": False, "off_axis": False}
+        self._rotation: dict[str, int] = {"on_axis": 0, "off_axis": 0}
+        self._flip_h: dict[str, bool] = {"on_axis": False, "off_axis": False}
+        self._flip_v: dict[str, bool] = {"on_axis": False, "off_axis": False}
 
         # Grab-thread control
         self._grab_thread: threading.Thread | None = None
@@ -88,16 +91,15 @@ class CameraManager:
                     cam_info = cam.get_camera_information()
                     calib = cam_info.camera_configuration.calibration_parameters
                     left = calib.left_cam
+                    right = calib.right_cam
                     res = cam_info.camera_configuration.resolution
-                    self._intrinsics[name] = {
-                        "fx": float(left.fx),
-                        "fy": float(left.fy),
-                        "cx": float(left.cx),
-                        "cy": float(left.cy),
-                        "distortion": [float(d) for d in left.disto],
-                        "image_width": int(res.width),
-                        "image_height": int(res.height),
+                    left_intrinsics = self._build_intrinsics(left, res)
+                    right_intrinsics = self._build_intrinsics(right, res)
+                    self._intrinsics_by_eye[name] = {
+                        "left": left_intrinsics,
+                        "right": right_intrinsics,
                     }
+                    self._intrinsics[name] = left_intrinsics
                     self._camera_info[name] = {
                         "serial": serial,
                         "resolution": [int(res.width), int(res.height)],
@@ -105,8 +107,8 @@ class CameraManager:
                     }
                     print(
                         f"[camera_manager] {name} intrinsics: "
-                        f"fx={left.fx:.1f} fy={left.fy:.1f} "
-                        f"cx={left.cx:.1f} cy={left.cy:.1f} "
+                        f"left=({left.fx:.1f}, {left.fy:.1f}, {left.cx:.1f}, {left.cy:.1f}) "
+                        f"right=({right.fx:.1f}, {right.fy:.1f}, {right.cx:.1f}, {right.cy:.1f}) "
                         f"res={res.width}x{res.height}"
                     )
                 except Exception as exc:
@@ -120,6 +122,9 @@ class CameraManager:
                 self._locks.pop(name, None)
                 self._latest_images.pop(name, None)
                 self._streaming_mats.pop(name, None)
+                self._intrinsics.pop(name, None)
+                self._intrinsics_by_eye.pop(name, None)
+                self._camera_info.pop(name, None)
 
     def close(self) -> None:
         """Stop any active recording and close every camera."""
@@ -136,6 +141,9 @@ class CameraManager:
             self._locks.clear()
             self._latest_images.clear()
             self._streaming_mats.clear()
+            self._intrinsics.clear()
+            self._intrinsics_by_eye.clear()
+            self._camera_info.clear()
         if self._grab_thread is not None and self._grab_thread.is_alive():
             print("[camera_manager] WARNING: grab thread still alive after close")
 
@@ -153,9 +161,17 @@ class CameraManager:
             "on_axis": config.get("on_axis_swap_eyes", False),
             "off_axis": config.get("off_axis_swap_eyes", False),
         }
-        self._flip = {
-            "on_axis": config.get("on_axis_flip", False),
-            "off_axis": config.get("off_axis_flip", False),
+        self._rotation = {
+            "on_axis": config.get("on_axis_rotation", 0),
+            "off_axis": config.get("off_axis_rotation", 0),
+        }
+        self._flip_h = {
+            "on_axis": config.get("on_axis_flip_h", False),
+            "off_axis": config.get("off_axis_flip_h", False),
+        }
+        self._flip_v = {
+            "on_axis": config.get("on_axis_flip_v", False),
+            "off_axis": config.get("off_axis_flip_v", False),
         }
 
         new_on = config.get("on_axis_serial", "")
@@ -175,7 +191,7 @@ class CameraManager:
 
         print(
             f"[camera_manager] Config applied: swap_eyes={self._swap_eyes}, "
-            f"flip={self._flip}"
+            f"rotation={self._rotation}, flip_h={self._flip_h}, flip_v={self._flip_v}"
         )
 
     # ------------------------------------------------------------------
@@ -328,9 +344,7 @@ class CameraManager:
         if data is None:
             return None
 
-        # Apply 180° flip if configured
-        if self._flip.get(camera_name, False):
-            data = cv2.rotate(data, cv2.ROTATE_180)
+        data = self._apply_transforms(camera_name, data)
 
         ok, jpeg = cv2.imencode(
             ".jpg", data, [cv2.IMWRITE_JPEG_QUALITY, 70]
@@ -345,6 +359,12 @@ class CameraManager:
 
     def get_intrinsics(self, camera_name: str) -> dict | None:
         """Return the ZED SDK intrinsics for a camera, or None."""
+        per_eye = self._intrinsics_by_eye.get(camera_name)
+        if per_eye:
+            active_eye = "right" if self._swap_eyes.get(camera_name, False) else "left"
+            intrinsics = per_eye.get(active_eye) or per_eye.get("left")
+            if intrinsics is not None:
+                return intrinsics
         return self._intrinsics.get(camera_name)
 
     def get_camera_info(self) -> dict:
@@ -362,6 +382,8 @@ class CameraManager:
         """Grab a single frame and return (jpeg_bytes, bgr_numpy_array).
 
         Used by the calibrator to get a frame for ChArUco detection.
+        Applies eye-swap and flip config so downstream processing sees the
+        correctly oriented image.
         Returns (None, None) if the camera is unavailable.
         """
         cam = self.cameras.get(camera_name)
@@ -372,22 +394,29 @@ class CameraManager:
         if lock is None:
             return None, None
 
+        # Apply eye swap
+        view = sl.VIEW.LEFT
+        if self._swap_eyes.get(camera_name, False):
+            view = sl.VIEW.RIGHT
+
         image = self._streaming_mats.get(camera_name) or sl.Mat()
 
         if self.recording:
             with lock:
-                cam.retrieve_image(image, sl.VIEW.LEFT)
+                cam.retrieve_image(image, view)
                 data = image.get_data()
         else:
             with lock:
                 runtime = sl.RuntimeParameters()
                 if cam.grab(runtime) != sl.ERROR_CODE.SUCCESS:
                     return None, None
-                cam.retrieve_image(image, sl.VIEW.LEFT)
+                cam.retrieve_image(image, view)
                 data = image.get_data()
 
         if data is None:
             return None, None
+
+        data = self._apply_transforms(camera_name, data)
 
         # ZED SDK returns BGRA, convert to BGR for OpenCV
         bgr = cv2.cvtColor(data, cv2.COLOR_BGRA2BGR)
@@ -431,6 +460,40 @@ class CameraManager:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    _ROTATION_MAP = {
+        90: cv2.ROTATE_90_CLOCKWISE,
+        180: cv2.ROTATE_180,
+        270: cv2.ROTATE_90_COUNTERCLOCKWISE,
+    }
+
+    def _apply_transforms(self, camera_name: str, image: "np.ndarray") -> "np.ndarray":
+        """Apply configured rotation and flips to an image.
+
+        Order: rotation first, then horizontal flip, then vertical flip.
+        """
+        degrees = self._rotation.get(camera_name, 0)
+        cv2_code = self._ROTATION_MAP.get(degrees)
+        if cv2_code is not None:
+            image = cv2.rotate(image, cv2_code)
+        if self._flip_h.get(camera_name, False):
+            image = cv2.flip(image, 1)  # horizontal (left-right)
+        if self._flip_v.get(camera_name, False):
+            image = cv2.flip(image, 0)  # vertical (top-bottom)
+        return image
+
+    @staticmethod
+    def _build_intrinsics(cam_params: "sl.CameraParameters", resolution: "sl.Resolution") -> dict:
+        """Convert ZED SDK camera parameters into the calibration JSON shape."""
+        return {
+            "fx": float(cam_params.fx),
+            "fy": float(cam_params.fy),
+            "cx": float(cam_params.cx),
+            "cy": float(cam_params.cy),
+            "distortion": [float(d) for d in cam_params.disto],
+            "image_width": int(resolution.width),
+            "image_height": int(resolution.height),
+        }
 
     def _disable_all_recording(self) -> None:
         for cam in self.cameras.values():

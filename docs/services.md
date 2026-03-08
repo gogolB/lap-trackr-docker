@@ -26,10 +26,11 @@ Detailed internals of each microservice for developers extending the system.
 ### Startup Behavior
 
 1. **JWT guard**: Refuses to start if `JWT_SECRET` matches known defaults
-2. **Table creation**: `Base.metadata.create_all()` via SQLAlchemy
-3. **Lightweight migrations**: Adds missing columns (`name` on sessions, `warnings` on grading_results) using `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`
+2. **Schema initialization**: Runs Alembic automatically at startup
+3. **Legacy bootstrap fallback**: If the DB has no `alembic_version`, bootstraps the current schema and stamps head
 4. **Model seeding**: Inserts catalog models from `MODEL_CATALOG` if not already present
-5. **Periodic sweep**: Background task runs every 5 minutes, marks sessions stuck in `exporting` or `grading` for >30 minutes as failed
+5. **Stale-session sweep**: Marks sessions stuck in `exporting` or `grading` for >30 minutes as failed
+6. **Periodic sweep**: Re-runs the stale-session sweep every 5 minutes
 
 ### Database Migrations
 
@@ -43,7 +44,9 @@ docker compose exec api alembic revision --autogenerate -m "description"
 docker compose exec api alembic upgrade head
 ```
 
-In practice, the startup lightweight migration approach (ALTER TABLE IF NOT EXISTS) handles most schema changes without running Alembic explicitly.
+In normal operation, the API applies pending migrations automatically on startup. Manual `alembic upgrade head` is mainly for debugging, preflight checks, or repairing a DB before the API is restarted.
+
+All new schema changes should be migration-backed. Do not add new one-off schema mutations in application startup code.
 
 ### Adding a New Router
 
@@ -126,9 +129,9 @@ To support a camera other than ZED X:
 
 ### Technology
 
-- Python 3.10, Redis (BRPOP worker), SQLAlchemy (sync/psycopg2), scipy, numpy
-- Production: ZED SDK, PyTorch, ultralytics (YOLO)
-- Dev: No ZED SDK, no PyTorch -- falls back to synthetic data and placeholder backend
+- Production: ZED SDK runtime image (`stereolabs/zed:5.2-py-runtime-jetson-jp5.1.2`, Python 3.8), Redis (BRPOP worker), SQLAlchemy (sync/psycopg2), scipy, numpy
+- Development: lightweight Python image, no ZED SDK, no PyTorch -- falls back to synthetic data and placeholder backend
+- Production ML stack includes PyTorch and optional Ultralytics YOLO models
 
 ### Key Files
 
@@ -158,6 +161,8 @@ The grader runs two separate worker processes (separate containers, same image):
 
 Both use `BRPOP` (blocking pop) with a 5-second timeout. Jobs are JSON strings pushed via `LPUSH` by the API.
 
+The exporter processes `on_axis` and `off_axis` in parallel within a single session job, then runs initial color-based tip detection across the extracted sample frames.
+
 ### Pipeline Stages
 
 The grading pipeline in `pipeline.py` runs these stages sequentially:
@@ -184,11 +189,14 @@ Each stage publishes progress to Redis (`job_progress:{session_id}` hash) for re
 
 - `{camera}_left.mp4` and `{camera}_right.mp4` (left/right eye videos)
 - `{camera}_depth.npz` (depth frames as numpy arrays in a ZIP archive)
+- `*_sample_*.jpg` (sample frames used for tip initialization)
 
 Video encoding tries:
 1. **GStreamer + NVENC** (Jetson hardware encoder, 20 Mbps H.264)
 2. **OpenCV avc1** (software H.264)
 3. **OpenCV mp4v** (software MPEG-4)
+
+After both cameras finish exporting, the worker writes `tip_detections.json` from the extracted sample frames and advances the session to `awaiting_init`, `completed`, or `graded` depending on existing session artifacts.
 
 ### Database Access
 
@@ -290,6 +298,8 @@ No rebuild needed since the config is bind-mounted (`:ro`).
 
 PostgreSQL 15 with data stored at `/data/postgres`.
 
+See [Database & Migrations](database.md) for schema ownership, migration workflow, and backup/restore guidance.
+
 ### Connection Details
 
 - Host: `db` (Docker service name)
@@ -318,6 +328,6 @@ Redis 7 with data stored at `/data/redis`.
 
 | Key Pattern | Used By | Purpose |
 |-------------|---------|---------|
-| `job_progress:{session_id}` | Workers | Stage, current, total, percent, detail |
+| `job_progress:{session_id}` | Workers | Overall stage plus per-stage JSON payloads (`stage__*`) with counts, timestamps, percent, detail, and status |
 | `model_download:{model_id}` | API | Downloaded bytes, total bytes, percent |
 | `export_cancel:{session_id}` | Export worker | Cancellation signal |

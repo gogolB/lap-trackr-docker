@@ -68,8 +68,12 @@ async def apply_camera_config(
         "off_axis_serial": config.off_axis_serial,
         "on_axis_swap_eyes": config.on_axis_swap_eyes,
         "off_axis_swap_eyes": config.off_axis_swap_eyes,
-        "on_axis_flip": config.on_axis_flip,
-        "off_axis_flip": config.off_axis_flip,
+        "on_axis_rotation": config.on_axis_rotation,
+        "off_axis_rotation": config.off_axis_rotation,
+        "on_axis_flip_h": config.on_axis_flip_h,
+        "on_axis_flip_v": config.on_axis_flip_v,
+        "off_axis_flip_h": config.off_axis_flip_h,
+        "off_axis_flip_v": config.off_axis_flip_v,
     }
 
     try:

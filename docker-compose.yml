@@ -102,6 +102,9 @@ services:
       dockerfile: Dockerfile
     restart: unless-stopped
     runtime: nvidia
+    devices:
+      - /dev/nvhost-msenc:/dev/nvhost-msenc
+      - /dev/nvhost-nvdec:/dev/nvhost-nvdec
     environment:
       REDIS_URL: ${REDIS_URL}
       DATABASE_URL: ${DATABASE_URL}
@@ -125,6 +128,13 @@ services:
     command: ["python3", "-m", "app.export_worker"]
     restart: unless-stopped
     runtime: nvidia
+    devices:
+      - /dev/video0:/dev/video0
+      - /dev/video1:/dev/video1
+      - /dev/video2:/dev/video2
+      - /dev/video3:/dev/video3
+      - /dev/nvhost-msenc:/dev/nvhost-msenc
+      - /dev/nvhost-nvdec:/dev/nvhost-nvdec
     environment:
       REDIS_URL: ${REDIS_URL}
       DATABASE_URL: ${DATABASE_URL}

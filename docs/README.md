@@ -12,6 +12,7 @@ Capture and grade laparoscopic surgical training sessions using stereo cameras, 
 | [Environment Variables](environment-variables.md) | Complete reference for all configuration |
 | [API Reference](api-reference.md) | REST endpoints, authentication, request/response formats |
 | [Services Deep Dive](services.md) | Internals of each microservice |
+| [Database & Migrations](database.md) | PostgreSQL schema ownership, Redis job state, Alembic workflow, backup/restore |
 | [Data Model](data-model.md) | Database schema, session directory layout, file formats |
 | [Calibration Guide](calibration.md) | Camera calibration workflow and ChArUco board setup |
 | [ML Backends](ml-backends.md) | Instrument detection models and the tracking pipeline |

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import abc
 from dataclasses import dataclass
-from typing import List
+from typing import Callable, List
 
 import numpy as np
 
@@ -31,6 +31,7 @@ class ModelBackend(abc.ABC):
         self,
         frames: list[np.ndarray],
         query_points: np.ndarray | None = None,
+        on_progress: Callable[[int, int], None] | None = None,
     ) -> list[list[Detection]]:
         """Run detection on a batch of BGR frames.
 
@@ -40,6 +41,8 @@ class ModelBackend(abc.ABC):
             BGR images.
         query_points : np.ndarray, optional
             (N, 3) array of [frame_idx, x, y] initialization points.
+        on_progress : callable, optional
+            ``(current, total)`` callback for batch progress updates.
 
         Returns one inner list per frame, each containing detections.
         """

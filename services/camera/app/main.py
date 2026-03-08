@@ -35,7 +35,12 @@ def _get_calibrator(camera_name: str) -> ChArUcoCalibrator:
                 status_code=404,
                 detail=f"No intrinsics available for '{camera_name}'. Camera may not be open.",
             )
-        _calibrators[camera_name] = ChArUcoCalibrator(intrinsics)
+        _calibrators[camera_name] = ChArUcoCalibrator(
+            intrinsics,
+            rotation=manager._rotation.get(camera_name, 0),
+            flip_h=manager._flip_h.get(camera_name, False),
+            flip_v=manager._flip_v.get(camera_name, False),
+        )
     return _calibrators[camera_name]
 
 
@@ -62,8 +67,12 @@ class CameraConfigApply(BaseModel):
     off_axis_serial: str = ""
     on_axis_swap_eyes: bool = False
     off_axis_swap_eyes: bool = False
-    on_axis_flip: bool = False
-    off_axis_flip: bool = False
+    on_axis_rotation: int = 0
+    off_axis_rotation: int = 0
+    on_axis_flip_h: bool = False
+    on_axis_flip_v: bool = False
+    off_axis_flip_h: bool = False
+    off_axis_flip_v: bool = False
 
 
 class RecordStartRequest(BaseModel):
@@ -185,78 +194,16 @@ def apply_config(body: CameraConfigApply):
     """Apply camera configuration (eye swap, flip, serial assignment)."""
     config_dict = body.model_dump()
     manager.apply_config(config_dict)
+    # Invalidate calibrators so they get recreated with updated rotation/flip
+    _calibrators.clear()
     return {"status": "applied", "config": config_dict}
 
 
 # ---------------------------------------------------------------------------
 # Calibration endpoints
+# NOTE: Literal "/stereo" routes MUST come before "/{camera_name}" routes
+# so FastAPI doesn't match "stereo" as a camera_name path parameter.
 # ---------------------------------------------------------------------------
-
-@app.post("/calibration/capture/{camera_name}")
-def calibration_capture(camera_name: str):
-    """Capture a frame, detect ChArUco corners, and accumulate."""
-    if camera_name not in manager.cameras:
-        raise HTTPException(status_code=404, detail=f"Camera '{camera_name}' not found")
-
-    jpeg_bytes, bgr = manager.capture_calibration_frame(camera_name)
-    if bgr is None:
-        raise HTTPException(status_code=500, detail="Failed to capture frame")
-
-    calibrator = _get_calibrator(camera_name)
-    result = calibrator.detect(bgr)
-
-    # Convert preview JPEG to base64 for JSON transport
-    preview_b64 = None
-    if result.get("preview_jpeg"):
-        preview_b64 = base64.b64encode(result["preview_jpeg"]).decode("ascii")
-
-    return {
-        "success": result["success"],
-        "markers_detected": result["markers_detected"],
-        "charuco_corners": result["charuco_corners"],
-        "coverage_pct": result["coverage_pct"],
-        "total_captures": result["total_captures"],
-        "preview_jpeg_b64": preview_b64,
-    }
-
-
-@app.post("/calibration/compute/{camera_name}")
-def calibration_compute(camera_name: str):
-    """Compute extrinsic calibration from accumulated captures."""
-    if camera_name not in manager.cameras:
-        raise HTTPException(status_code=404, detail=f"Camera '{camera_name}' not found")
-
-    calibrator = _get_calibrator(camera_name)
-    intrinsics = manager.get_intrinsics(camera_name)
-    result = calibrator.compute()
-
-    if not result["success"]:
-        raise HTTPException(status_code=422, detail=result.get("error", "Calibration failed"))
-
-    # Build the full calibration JSON structure
-    calibration = {
-        "version": 1,
-        "is_global": False,
-        "camera_name": camera_name,
-        "intrinsics": intrinsics,
-        "extrinsic_matrix": result["extrinsic_matrix"],
-        "board_config": calibrator.get_board_config(),
-        "quality": {
-            "reprojection_error": result["reprojection_error"],
-            "num_frames_used": result["num_frames_used"],
-        },
-    }
-
-    return calibration
-
-
-@app.post("/calibration/reset/{camera_name}")
-def calibration_reset(camera_name: str):
-    """Reset accumulated calibration captures for a camera."""
-    if camera_name in _calibrators:
-        _calibrators[camera_name].reset()
-    return {"status": "reset", "camera": camera_name}
-
 
 @app.post("/calibration/capture/stereo")
 def calibration_capture_stereo():
@@ -271,7 +218,7 @@ def calibration_capture_stereo():
             raise HTTPException(status_code=500, detail=f"Failed to capture frame from {camera_name}")
 
         calibrator = _get_calibrator(camera_name)
-        result = calibrator.detect(bgr)
+        result = calibrator.detect(bgr, camera_name=camera_name)
 
         preview_b64 = None
         if result.get("preview_jpeg"):
@@ -346,6 +293,72 @@ def calibration_reset_stereo():
         if camera_name in _calibrators:
             _calibrators[camera_name].reset()
     return {"status": "reset", "cameras": ["on_axis", "off_axis"]}
+
+
+@app.post("/calibration/capture/{camera_name}")
+def calibration_capture(camera_name: str):
+    """Capture a frame, detect ChArUco corners, and accumulate."""
+    if camera_name not in manager.cameras:
+        raise HTTPException(status_code=404, detail=f"Camera '{camera_name}' not found")
+
+    jpeg_bytes, bgr = manager.capture_calibration_frame(camera_name)
+    if bgr is None:
+        raise HTTPException(status_code=500, detail="Failed to capture frame")
+
+    calibrator = _get_calibrator(camera_name)
+    result = calibrator.detect(bgr)
+
+    # Convert preview JPEG to base64 for JSON transport
+    preview_b64 = None
+    if result.get("preview_jpeg"):
+        preview_b64 = base64.b64encode(result["preview_jpeg"]).decode("ascii")
+
+    return {
+        "success": result["success"],
+        "markers_detected": result["markers_detected"],
+        "charuco_corners": result["charuco_corners"],
+        "coverage_pct": result["coverage_pct"],
+        "total_captures": result["total_captures"],
+        "preview_jpeg_b64": preview_b64,
+    }
+
+
+@app.post("/calibration/compute/{camera_name}")
+def calibration_compute(camera_name: str):
+    """Compute extrinsic calibration from accumulated captures."""
+    if camera_name not in manager.cameras:
+        raise HTTPException(status_code=404, detail=f"Camera '{camera_name}' not found")
+
+    calibrator = _get_calibrator(camera_name)
+    intrinsics = manager.get_intrinsics(camera_name)
+    result = calibrator.compute()
+
+    if not result["success"]:
+        raise HTTPException(status_code=422, detail=result.get("error", "Calibration failed"))
+
+    # Build the full calibration JSON structure
+    calibration = {
+        "version": 1,
+        "is_global": False,
+        "camera_name": camera_name,
+        "intrinsics": intrinsics,
+        "extrinsic_matrix": result["extrinsic_matrix"],
+        "board_config": calibrator.get_board_config(),
+        "quality": {
+            "reprojection_error": result["reprojection_error"],
+            "num_frames_used": result["num_frames_used"],
+        },
+    }
+
+    return calibration
+
+
+@app.post("/calibration/reset/{camera_name}")
+def calibration_reset(camera_name: str):
+    """Reset accumulated calibration captures for a camera."""
+    if camera_name in _calibrators:
+        _calibrators[camera_name].reset()
+    return {"status": "reset", "camera": camera_name}
 
 
 @app.get("/calibration/status")

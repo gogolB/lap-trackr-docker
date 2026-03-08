@@ -82,6 +82,12 @@ Get the current authenticated user.
 
 ## Session Endpoints
 
+Session status lifecycle:
+
+- `recording -> exporting -> awaiting_init -> completed -> grading -> graded`
+- `export_failed` and `failed` are retryable failure states
+- `re-export` can move an existing session back to `exporting` without creating a new session
+
 ### GET /sessions/
 
 List sessions for the authenticated user.
@@ -174,11 +180,28 @@ Queue the session for ML grading. Requires status `completed`.
 
 ### POST /sessions/{id}/re-export
 
-Re-run the export pipeline. Cancels any active export first.
+Re-run the export pipeline for an existing session.
+
+Behavior:
+
+- rejects sessions in `recording` or `grading`
+- if the session is already `exporting`, sets a Redis cancel flag and re-queues export
+- clears the old progress hash before queueing the new export
+- preserves the intended post-export state:
+  - `awaiting_init` if no `tip_init.json` exists
+  - `completed` if `tip_init.json` already exists
+  - `graded` if the session was already graded
+
+**Response (200):** SessionOut with status `exporting`.
 
 ### POST /sessions/{id}/retry
 
-Retry a failed or export_failed session.
+Retry a failed session.
+
+- `export_failed` sessions re-enter `exporting`
+- `failed` sessions re-enter `grading`
+
+**Response (200):** SessionOut with status `exporting` or `grading`.
 
 ### GET /sessions/{id}/progress
 
@@ -187,26 +210,73 @@ Get real-time progress of an active export or grading job.
 **Response (200):**
 ```json
 {
+  "session_id": "uuid",
+  "status": "grading",
   "stage": "detect_on_axis",
   "current": 45,
   "total": 200,
   "percent": 22.5,
   "detail": "Processing frame 45/200",
-  "started_at": 1709884800.0,
+  "updated_at": 1709884805.4,
+  "stage_started_at": 1709884800.0,
   "stages": {
-    "load_on_axis": {"current": 200, "total": 200, "percent": 100, "elapsed": 5.2},
-    "load_off_axis": {"current": 200, "total": 200, "percent": 100, "elapsed": 4.8}
+    "load_on_axis": {
+      "stage": "load_on_axis",
+      "current": 200,
+      "total": 200,
+      "percent": 100,
+      "detail": "Loaded 200 sampled frames",
+      "status": "completed",
+      "updated_at": 1709884802.1,
+      "started_at": 1709884797.0
+    },
+    "detect_on_axis": {
+      "stage": "detect_on_axis",
+      "current": 45,
+      "total": 200,
+      "percent": 22.5,
+      "detail": "On-axis camera",
+      "status": "running",
+      "updated_at": 1709884805.4,
+      "started_at": 1709884803.0
+    }
   }
 }
 ```
 
+Export stage keys commonly include:
+
+- `export_on_axis`
+- `export_off_axis`
+- `detect_tips`
+
+Grading stage keys commonly include:
+
+- `load_on_axis`
+- `load_off_axis`
+- `detect_on_axis`
+- `detect_off_axis`
+- `render_on_axis`
+- `render_off_axis`
+- `estimate_poses`
+- `calculate_metrics`
+
 ### GET /sessions/{id}/download
 
-Download a ZIP archive of the session directory (MP4, NPZ, calibration, results).
+Download a ZIP archive of the session directory. The archive may include:
+
+- source `.svo2` files
+- exported left/right MP4 files for both cameras
+- depth `.npz` files
+- calibration JSON
+- sample JPEGs
+- `tip_detections.json`
+- `tip_init.json`
+- `results/` artifacts including metrics, poses, tracking CSVs, and tracking videos
 
 **Response:** `application/zip` stream. Symlinks are excluded for security.
 
-### DELETE /sessions/{id}/delete
+### DELETE /sessions/{id}
 
 Delete a session and all its files. Blocked while status is `recording`, `exporting`, or `grading`.
 

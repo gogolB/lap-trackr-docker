@@ -89,8 +89,12 @@ export default function ConfigPage() {
         off_axis_serial: form.off_axis_serial,
         on_axis_swap_eyes: form.on_axis_swap_eyes,
         off_axis_swap_eyes: form.off_axis_swap_eyes,
-        on_axis_flip: form.on_axis_flip,
-        off_axis_flip: form.off_axis_flip,
+        on_axis_rotation: form.on_axis_rotation,
+        off_axis_rotation: form.off_axis_rotation,
+        on_axis_flip_h: form.on_axis_flip_h,
+        on_axis_flip_v: form.on_axis_flip_v,
+        off_axis_flip_h: form.off_axis_flip_h,
+        off_axis_flip_v: form.off_axis_flip_v,
       });
       queryClient.invalidateQueries({ queryKey: ["camera-config"] });
       setMessage({ type: "success", text: "Configuration saved." });
@@ -115,8 +119,12 @@ export default function ConfigPage() {
           off_axis_serial: form.off_axis_serial,
           on_axis_swap_eyes: form.on_axis_swap_eyes,
           off_axis_swap_eyes: form.off_axis_swap_eyes,
-          on_axis_flip: form.on_axis_flip,
-          off_axis_flip: form.off_axis_flip,
+          on_axis_rotation: form.on_axis_rotation,
+          off_axis_rotation: form.off_axis_rotation,
+          on_axis_flip_h: form.on_axis_flip_h,
+          on_axis_flip_v: form.on_axis_flip_v,
+          off_axis_flip_h: form.off_axis_flip_h,
+          off_axis_flip_v: form.off_axis_flip_v,
         });
       }
       await applyCameraConfig();
@@ -156,7 +164,7 @@ export default function ConfigPage() {
       <div>
         <h1 className="text-2xl font-bold text-white">Camera Configuration</h1>
         <p className="mt-1 text-sm text-slate-400">
-          Configure camera serial assignments, eye swap, and flip settings
+          Configure camera serial assignments, eye swap, and rotation settings
         </p>
       </div>
 
@@ -199,10 +207,28 @@ export default function ConfigPage() {
               checked={form.on_axis_swap_eyes}
               onChange={(v) => updateField("on_axis_swap_eyes", v)}
             />
+            <label className="flex items-center justify-between gap-3">
+              <span className="text-sm text-slate-300">Rotation</span>
+              <select
+                value={form.on_axis_rotation}
+                onChange={(e) => updateField("on_axis_rotation", Number(e.target.value))}
+                className="rounded-lg border border-slate-600 bg-slate-800 px-3 py-1.5 text-sm text-white focus:border-teal-500 focus:outline-none focus:ring-1 focus:ring-teal-500"
+              >
+                <option value={0}>0° (normal)</option>
+                <option value={90}>90° CW</option>
+                <option value={180}>180° (upside-down)</option>
+                <option value={270}>270° CW</option>
+              </select>
+            </label>
             <Toggle
-              label="Flip 180° (upside-down mount)"
-              checked={form.on_axis_flip}
-              onChange={(v) => updateField("on_axis_flip", v)}
+              label="Flip Horizontal (mirror left-right)"
+              checked={form.on_axis_flip_h}
+              onChange={(v) => updateField("on_axis_flip_h", v)}
+            />
+            <Toggle
+              label="Flip Vertical (mirror top-bottom)"
+              checked={form.on_axis_flip_v}
+              onChange={(v) => updateField("on_axis_flip_v", v)}
             />
           </div>
         </div>
@@ -233,10 +259,28 @@ export default function ConfigPage() {
               checked={form.off_axis_swap_eyes}
               onChange={(v) => updateField("off_axis_swap_eyes", v)}
             />
+            <label className="flex items-center justify-between gap-3">
+              <span className="text-sm text-slate-300">Rotation</span>
+              <select
+                value={form.off_axis_rotation}
+                onChange={(e) => updateField("off_axis_rotation", Number(e.target.value))}
+                className="rounded-lg border border-slate-600 bg-slate-800 px-3 py-1.5 text-sm text-white focus:border-teal-500 focus:outline-none focus:ring-1 focus:ring-teal-500"
+              >
+                <option value={0}>0° (normal)</option>
+                <option value={90}>90° CW</option>
+                <option value={180}>180° (upside-down)</option>
+                <option value={270}>270° CW</option>
+              </select>
+            </label>
             <Toggle
-              label="Flip 180° (upside-down mount)"
-              checked={form.off_axis_flip}
-              onChange={(v) => updateField("off_axis_flip", v)}
+              label="Flip Horizontal (mirror left-right)"
+              checked={form.off_axis_flip_h}
+              onChange={(v) => updateField("off_axis_flip_h", v)}
+            />
+            <Toggle
+              label="Flip Vertical (mirror top-bottom)"
+              checked={form.off_axis_flip_v}
+              onChange={(v) => updateField("off_axis_flip_v", v)}
             />
           </div>
         </div>

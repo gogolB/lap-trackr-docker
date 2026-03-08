@@ -46,6 +46,7 @@ class GradingResultOut(BaseModel):
     total_time: float | None = None
     completed_at: datetime | None = None
     error: str | None = None
+    warnings: list[str] | None = None
 
     model_config = {"from_attributes": True}
 
@@ -140,8 +141,12 @@ class CameraConfigOut(BaseModel):
     off_axis_serial: str
     on_axis_swap_eyes: bool = False
     off_axis_swap_eyes: bool = False
-    on_axis_flip: bool = False
-    off_axis_flip: bool = False
+    on_axis_rotation: int = 0
+    off_axis_rotation: int = 0
+    on_axis_flip_h: bool = False
+    on_axis_flip_v: bool = False
+    off_axis_flip_h: bool = False
+    off_axis_flip_v: bool = False
     updated_at: datetime | None = None
 
     model_config = {"from_attributes": True}
@@ -152,8 +157,12 @@ class CameraConfigUpdate(BaseModel):
     off_axis_serial: str | None = None
     on_axis_swap_eyes: bool | None = None
     off_axis_swap_eyes: bool | None = None
-    on_axis_flip: bool | None = None
-    off_axis_flip: bool | None = None
+    on_axis_rotation: int | None = None
+    off_axis_rotation: int | None = None
+    on_axis_flip_h: bool | None = None
+    on_axis_flip_v: bool | None = None
+    off_axis_flip_h: bool | None = None
+    off_axis_flip_v: bool | None = None
 
 
 # ── ML Models ───────────────────────────────────────────────────────

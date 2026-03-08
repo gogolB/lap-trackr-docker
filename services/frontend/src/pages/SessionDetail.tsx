@@ -15,6 +15,8 @@ import {
   getSession,
   getMetrics,
   gradeSession,
+  retrySession,
+  reExportSession,
   deleteSession,
   downloadSession,
   getSessionDuration,
@@ -61,12 +63,138 @@ const CHART_COLORS = [
   "#3b82f6", // blue-500
 ];
 
+type StageDefinition = {
+  key: string;
+  label: string;
+};
+
+const EXPORT_STAGES: StageDefinition[] = [
+  { key: "export_on_axis", label: "Export On-Axis Cameras" },
+  { key: "export_off_axis", label: "Export Off-Axis Cameras" },
+  { key: "detect_tips", label: "Detect Initial Tips" },
+];
+
+const GRADING_STAGES: StageDefinition[] = [
+  { key: "load_on_axis", label: "Load On-Axis Data" },
+  { key: "load_off_axis", label: "Load Off-Axis Data" },
+  { key: "detect_on_axis", label: "Detect Tips On-Axis" },
+  { key: "detect_off_axis", label: "Detect Tips Off-Axis" },
+  { key: "render_on_axis", label: "Render On-Axis Overlay" },
+  { key: "render_off_axis", label: "Render Off-Axis Overlay" },
+  { key: "estimate_poses", label: "Calculate Fused Positions" },
+  { key: "calculate_metrics", label: "Calculate Metrics" },
+];
+
+function formatEta(seconds: number | null): string {
+  if (seconds === null || !Number.isFinite(seconds)) return "--";
+  const rounded = Math.max(0, Math.ceil(seconds));
+  const mins = Math.floor(rounded / 60);
+  const secs = rounded % 60;
+  if (mins === 0) return `${secs}s`;
+  const hours = Math.floor(mins / 60);
+  if (hours === 0) return `${mins}m ${secs}s`;
+  return `${hours}h ${mins % 60}m`;
+}
+
+type StageView = StageDefinition & {
+  active: boolean;
+  done: boolean;
+  current: number;
+  total: number;
+  percent: number;
+  detail: string;
+  startedAt: number | null;
+};
+
+function estimateEtaSeconds(stage: StageView): number | null {
+  if (
+    !stage.active ||
+    !stage.startedAt ||
+    stage.total <= 0 ||
+    stage.current <= 0
+  ) {
+    return null;
+  }
+
+  const elapsed = Date.now() / 1000 - stage.startedAt;
+  if (elapsed <= 0) return null;
+
+  const remaining = stage.total - stage.current;
+  if (remaining <= 0) return 0;
+
+  const rate = stage.current / elapsed;
+  if (rate <= 0) return null;
+  return remaining / rate;
+}
+
+function buildStageProgress(stages: StageDefinition[], progress?: JobProgress): StageView[] {
+  const explicitStages = progress?.stages;
+  if (explicitStages && Object.keys(explicitStages).length > 0) {
+    return stages.map((stage) => {
+      const live = explicitStages[stage.key];
+      const active = live?.status === "running";
+      const done = live?.status === "completed";
+      return {
+        ...stage,
+        active,
+        done,
+        current: live?.current ?? 0,
+        total: live?.total ?? 0,
+        percent: done ? 100 : Math.min(live?.percent ?? 0, 100),
+        detail: live?.detail ?? (done ? "Done" : "Pending"),
+        startedAt: live?.started_at ?? null,
+      };
+    });
+  }
+
+  const isComplete = progress?.stage === "complete";
+  const activeIndex = isComplete
+    ? stages.length
+    : stages.findIndex((stage) => stage.key === progress?.stage);
+
+  return stages.map((stage, index) => {
+    const done = isComplete || (activeIndex >= 0 && index < activeIndex);
+    const active = !isComplete && activeIndex === index;
+    const current = active ? progress?.current ?? 0 : done ? 1 : 0;
+    const total = active ? progress?.total ?? 0 : done ? 1 : 0;
+    const percent = active ? Math.min(progress?.percent ?? 0, 100) : done ? 100 : 0;
+
+    return {
+      ...stage,
+      active,
+      done,
+      current,
+      total,
+      percent,
+      detail: active ? progress?.detail ?? "" : done ? "Done" : "Pending",
+      startedAt: active ? progress?.stage_started_at ?? null : null,
+    };
+  });
+}
+
+function formatStageCount(stage: {
+  active: boolean;
+  done: boolean;
+  current: number;
+  total: number;
+}): string {
+  if (stage.active && stage.total > 0) {
+    return `${stage.current.toLocaleString()} / ${stage.total.toLocaleString()}`;
+  }
+  if (stage.done) {
+    return "Done";
+  }
+  return "Pending";
+}
+
 export default function SessionDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
 
   const [isGrading, setIsGrading] = useState(false);
+  const [isRetrying, setIsRetrying] = useState(false);
+  const [isReExporting, setIsReExporting] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
   const [isDownloading, setIsDownloading] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
@@ -118,6 +246,39 @@ export default function SessionDetail() {
       );
     } finally {
       setIsGrading(false);
+    }
+  };
+
+  const handleRetry = async () => {
+    if (!id) return;
+    setActionError("");
+    setIsRetrying(true);
+    try {
+      await retrySession(id);
+      queryClient.invalidateQueries({ queryKey: ["session", id] });
+    } catch (err) {
+      setActionError(
+        err instanceof Error ? err.message : "Failed to retry session."
+      );
+    } finally {
+      setIsRetrying(false);
+    }
+  };
+
+  const handleReExport = async () => {
+    if (!id) return;
+    setActionError("");
+    setIsReExporting(true);
+    try {
+      await reExportSession(id);
+      queryClient.invalidateQueries({ queryKey: ["session", id] });
+      queryClient.invalidateQueries({ queryKey: ["progress", id] });
+    } catch (err) {
+      setActionError(
+        err instanceof Error ? err.message : "Failed to restart export."
+      );
+    } finally {
+      setIsReExporting(false);
     }
   };
 
@@ -187,6 +348,19 @@ export default function SessionDetail() {
         }))
     : [];
 
+  const canReExport =
+    (!!session.on_axis_path || !!session.off_axis_path) &&
+    session.status !== "recording" &&
+    session.status !== "grading";
+  const exportStageProgress =
+    session.status === "exporting"
+      ? buildStageProgress(EXPORT_STAGES, progress)
+      : [];
+  const gradingStageProgress =
+    session.status === "grading"
+      ? buildStageProgress(GRADING_STAGES, progress)
+      : [];
+
   return (
     <div className="space-y-6">
       {/* Breadcrumb */}
@@ -218,6 +392,39 @@ export default function SessionDetail() {
           </div>
 
           <div className="flex items-center gap-3">
+            {/* Re-export */}
+            {canReExport && (
+              <button
+                onClick={handleReExport}
+                disabled={isReExporting}
+                className="btn-secondary gap-2"
+              >
+                {isReExporting ? (
+                  <>
+                    <span className="h-4 w-4 animate-spin rounded-full border-2 border-slate-400/30 border-t-slate-400" />
+                    {session.status === "exporting" ? "Restarting..." : "Re-exporting..."}
+                  </>
+                ) : (
+                  <>
+                    <svg
+                      className="h-4 w-4"
+                      fill="none"
+                      viewBox="0 0 24 24"
+                      strokeWidth={2}
+                      stroke="currentColor"
+                    >
+                      <path
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182"
+                      />
+                    </svg>
+                    {session.status === "exporting" ? "Restart Export" : "Re-export"}
+                  </>
+                )}
+              </button>
+            )}
+
             {/* Download */}
             {(session.status === "completed" || session.status === "graded") && (
               <button
@@ -312,6 +519,39 @@ export default function SessionDetail() {
               </button>
             )}
 
+            {/* Retry failed sessions */}
+            {(session.status === "failed" || session.status === "export_failed") && (
+              <button
+                onClick={handleRetry}
+                disabled={isRetrying}
+                className="btn-secondary gap-2"
+              >
+                {isRetrying ? (
+                  <>
+                    <span className="h-4 w-4 animate-spin rounded-full border-2 border-slate-400/30 border-t-slate-400" />
+                    Retrying...
+                  </>
+                ) : (
+                  <>
+                    <svg
+                      className="h-4 w-4"
+                      fill="none"
+                      viewBox="0 0 24 24"
+                      strokeWidth={2}
+                      stroke="currentColor"
+                    >
+                      <path
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182"
+                      />
+                    </svg>
+                    Retry
+                  </>
+                )}
+              </button>
+            )}
+
             {/* Delete button */}
             {!showDeleteConfirm ? (
               <button
@@ -376,29 +616,43 @@ export default function SessionDetail() {
                 </p>
               </div>
             </div>
-            {progress && progress.total > 0 && (
-              <div className="space-y-2">
-                <div className="flex items-center justify-between text-sm">
-                  <span className="text-slate-400">
-                    {progress.stage || "Processing"}
-                  </span>
-                  <span className="font-mono text-slate-300">
-                    {progress.current.toLocaleString()} / {progress.total.toLocaleString()} frames
-                  </span>
+            <div className="space-y-3">
+              {exportStageProgress.map((stage) => (
+                <div key={stage.key} className="space-y-1.5">
+                  <div className="flex items-center justify-between text-sm">
+                    <span className={stage.active ? "text-white" : "text-slate-400"}>
+                      {stage.label}
+                    </span>
+                    <span className="font-mono text-slate-300">
+                      {formatStageCount(stage)}
+                    </span>
+                  </div>
+                  <div className="h-2.5 w-full overflow-hidden rounded-full bg-slate-700">
+                    <div
+                      className={`h-full rounded-full transition-all duration-300 ${
+                        stage.done
+                          ? "bg-emerald-400"
+                          : stage.active
+                            ? "bg-orange-400"
+                            : "bg-slate-600"
+                      }`}
+                      style={{ width: `${stage.percent}%` }}
+                    />
+                  </div>
+                  {stage.active && (
+                    <div className="flex items-center justify-between text-xs text-slate-500">
+                      <span>{stage.detail || "Processing..."}</span>
+                      <span>
+                        {estimateEtaSeconds(stage) !== null
+                          ? `ETA ${formatEta(estimateEtaSeconds(stage))}`
+                          : "ETA calculating..."}
+                      </span>
+                    </div>
+                  )}
                 </div>
-                <div className="h-2.5 w-full overflow-hidden rounded-full bg-slate-700">
-                  <div
-                    className="h-full rounded-full bg-orange-400 transition-all duration-300"
-                    style={{ width: `${Math.min(progress.percent, 100)}%` }}
-                  />
-                </div>
-                <div className="flex items-center justify-between text-xs text-slate-500">
-                  <span>{progress.percent.toFixed(1)}% complete</span>
-                  <span>This page updates automatically</span>
-                </div>
-              </div>
-            )}
-            {(!progress || progress.total === 0) && (
+              ))}
+            </div>
+            {!progress && (
               <p className="text-sm text-slate-500">
                 Waiting for progress data...
               </p>
@@ -490,29 +744,43 @@ export default function SessionDetail() {
                 </p>
               </div>
             </div>
-            {progress && progress.total > 0 && (
-              <div className="space-y-2">
-                <div className="flex items-center justify-between text-sm">
-                  <span className="text-slate-400">
-                    {progress.stage || "Processing"}
-                  </span>
-                  <span className="font-mono text-slate-300">
-                    Step {progress.current} / {progress.total}
-                  </span>
+            <div className="space-y-3">
+              {gradingStageProgress.map((stage) => (
+                <div key={stage.key} className="space-y-1.5">
+                  <div className="flex items-center justify-between text-sm">
+                    <span className={stage.active ? "text-white" : "text-slate-400"}>
+                      {stage.label}
+                    </span>
+                    <span className="font-mono text-slate-300">
+                      {formatStageCount(stage)}
+                    </span>
+                  </div>
+                  <div className="h-2.5 w-full overflow-hidden rounded-full bg-slate-700">
+                    <div
+                      className={`h-full rounded-full transition-all duration-300 ${
+                        stage.done
+                          ? "bg-emerald-400"
+                          : stage.active
+                            ? "bg-purple-400"
+                            : "bg-slate-600"
+                      }`}
+                      style={{ width: `${stage.percent}%` }}
+                    />
+                  </div>
+                  {stage.active && (
+                    <div className="flex items-center justify-between text-xs text-slate-500">
+                      <span>{stage.detail || "Processing..."}</span>
+                      <span>
+                        {estimateEtaSeconds(stage) !== null
+                          ? `ETA ${formatEta(estimateEtaSeconds(stage))}`
+                          : "ETA calculating..."}
+                      </span>
+                    </div>
+                  )}
                 </div>
-                <div className="h-2.5 w-full overflow-hidden rounded-full bg-slate-700">
-                  <div
-                    className="h-full rounded-full bg-purple-400 transition-all duration-300"
-                    style={{ width: `${Math.min(progress.percent, 100)}%` }}
-                  />
-                </div>
-                <div className="flex items-center justify-between text-xs text-slate-500">
-                  <span>{progress.percent.toFixed(1)}% complete</span>
-                  <span>This page updates automatically</span>
-                </div>
-              </div>
-            )}
-            {(!progress || progress.total === 0) && (
+              ))}
+            </div>
+            {!progress && (
               <p className="text-sm text-slate-500">
                 Waiting for progress data...
               </p>
@@ -544,6 +812,35 @@ export default function SessionDetail() {
                 {session.grading_result?.error ||
                   "An error occurred during processing. Please try again with a new session."}
               </p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Warnings from grading */}
+      {session.grading_result?.warnings && session.grading_result.warnings.length > 0 && (
+        <div className="card border-amber-500/30">
+          <div className="flex items-start gap-3">
+            <svg
+              className="mt-0.5 h-5 w-5 flex-shrink-0 text-amber-400"
+              fill="none"
+              viewBox="0 0 24 24"
+              strokeWidth={2}
+              stroke="currentColor"
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z"
+              />
+            </svg>
+            <div>
+              <p className="font-semibold text-amber-400">Grading Warnings</p>
+              <ul className="mt-1 space-y-1 text-sm text-slate-400">
+                {session.grading_result.warnings.map((w, i) => (
+                  <li key={i}>{w}</li>
+                ))}
+              </ul>
             </div>
           </div>
         </div>

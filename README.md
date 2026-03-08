@@ -293,7 +293,7 @@ The system uses a ChArUco board to calibrate camera extrinsics (camera-to-worksp
 
 Board parameters (configured via `.env`):
 - **9x14** checkerboard, **20mm** squares, **15mm** ArUco markers
-- Dictionary: **DICT_5X5_50**
+- Dictionary: **DICT_5X5_100**
 
 ### Workflow
 
@@ -311,10 +311,10 @@ Calibration is saved as a global default and automatically copied into each new 
 ```python
 python3 -c "
 import cv2
-d = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_5X5_50)
+d = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_5X5_100)
 b = cv2.aruco.CharucoBoard((9, 14), 0.020, 0.015, d)
 img = b.generateImage((900, 1400))
-cv2.imwrite('charuco_9x14.png', img)
+cv2.imwrite('charuco_9x14_dict5x5_100.png', img)
 "
 ```
 
