@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
 import {
+  applyCameraConfig,
   startSession,
   stopSession,
   captureStereoCalibrationFrame,
@@ -108,6 +109,27 @@ export default function LiveView() {
   const [defaults, setDefaults] = useState<CalibrationDefault[]>([]);
   const [boardConfig, setBoardConfig] = useState<BoardConfig | null>(null);
 
+  const refreshCalibStatus = useCallback(async () => {
+    const [statusResult, defaultsResult] = await Promise.allSettled([
+      getCalibrationStatus(),
+      getDefaultCalibrations(),
+    ]);
+
+    if (statusResult.status === "fulfilled") {
+      const statusData = statusResult.value;
+      setCalibStatus(statusData);
+      const camStatus = statusData["on_axis"];
+      if (camStatus) {
+        setCaptures(camStatus.total_captures);
+        setBoardConfig(camStatus.board_config);
+      }
+    }
+
+    if (defaultsResult.status === "fulfilled") {
+      setDefaults(defaultsResult.value);
+    }
+  }, []);
+
   // Timer management
   useEffect(() => {
     if (status === "recording") {
@@ -127,30 +149,22 @@ export default function LiveView() {
     };
   }, [status]);
 
+  useEffect(() => {
+    void applyCameraConfig().catch(() => {
+      // Keep the page usable even if camera config apply is temporarily unavailable.
+    });
+  }, []);
+
+  useEffect(() => {
+    void refreshCalibStatus();
+  }, [refreshCalibStatus]);
+
   // Fetch calibration status when panel opens
   useEffect(() => {
     if (calibOpen) {
-      refreshCalibStatus();
+      void refreshCalibStatus();
     }
-  }, [calibOpen]);
-
-  const refreshCalibStatus = async () => {
-    try {
-      const [statusData, defaultsData] = await Promise.all([
-        getCalibrationStatus(),
-        getDefaultCalibrations(),
-      ]);
-      setCalibStatus(statusData);
-      setDefaults(defaultsData);
-      const camStatus = statusData["on_axis"];
-      if (camStatus) {
-        setCaptures(camStatus.total_captures);
-        setBoardConfig(camStatus.board_config);
-      }
-    } catch {
-      // Ignore - status is optional
-    }
-  };
+  }, [calibOpen, refreshCalibStatus]);
 
   const formatElapsed = (seconds: number): string => {
     const mins = Math.floor(seconds / 60);
@@ -163,6 +177,7 @@ export default function LiveView() {
   const handleStart = useCallback(async () => {
     setError("");
     try {
+      await applyCameraConfig();
       const session = await startSession(sessionName);
       setActiveSession(session);
       setStatus("recording");

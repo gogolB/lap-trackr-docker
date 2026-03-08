@@ -1,8 +1,9 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
-echo Restarting Cameras...
-sudo systemctl restart nvargus-daemon
+set -euo pipefail
 
-sudo systemctl restart zed_x_daemon
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-echo Done!
+echo "Restarting Jetson camera stack..."
+sudo "${SCRIPT_DIR}/wait_for_jetson_cameras.sh"
+echo "Done!"

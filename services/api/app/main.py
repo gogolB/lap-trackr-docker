@@ -20,6 +20,8 @@ logger = logging.getLogger("api.startup")
 
 STALE_TIMEOUT_MINUTES = 30
 SWEEP_INTERVAL_SECONDS = 300  # 5 minutes
+CAMERA_CONFIG_APPLY_RETRY_INTERVAL_SECONDS = 5
+CAMERA_CONFIG_APPLY_MAX_ATTEMPTS = 24
 API_ROOT = Path(__file__).resolve().parents[1]
 ALEMBIC_INI = API_ROOT / "alembic.ini"
 ALEMBIC_MIGRATIONS = API_ROOT / "migrations"
@@ -175,6 +177,27 @@ async def _periodic_sweep() -> None:
             logger.exception("Error during stale session sweep")
 
 
+async def _apply_saved_camera_config_on_startup() -> None:
+    """Best-effort startup sync so the camera service uses persisted flips/rotation."""
+    for attempt in range(1, CAMERA_CONFIG_APPLY_MAX_ATTEMPTS + 1):
+        try:
+            async with async_session() as db:
+                await camera_config.push_saved_camera_config(db)
+            logger.info("Applied saved camera config to camera service")
+            return
+        except Exception as exc:
+            logger.warning(
+                "Startup camera config apply attempt %d/%d failed: %s",
+                attempt,
+                CAMERA_CONFIG_APPLY_MAX_ATTEMPTS,
+                exc,
+            )
+            if attempt == CAMERA_CONFIG_APPLY_MAX_ATTEMPTS:
+                logger.error("Giving up on startup camera config apply")
+                return
+            await asyncio.sleep(CAMERA_CONFIG_APPLY_RETRY_INTERVAL_SECONDS)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     if settings.JWT_SECRET in _INSECURE_JWT_SECRETS:
@@ -187,7 +210,13 @@ async def lifespan(app: FastAPI):
     await _seed_model_registry()
     await _sweep_stale_sessions()
     sweep_task = asyncio.create_task(_periodic_sweep())
+    camera_config_task = asyncio.create_task(_apply_saved_camera_config_on_startup())
     yield
+    camera_config_task.cancel()
+    try:
+        await camera_config_task
+    except asyncio.CancelledError:
+        pass
     sweep_task.cancel()
     try:
         await sweep_task

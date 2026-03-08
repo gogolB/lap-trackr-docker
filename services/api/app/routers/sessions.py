@@ -21,6 +21,7 @@ from app.core.auth import get_current_user
 from app.core.config import settings
 from app.core.database import get_db
 from app.models.models import CameraConfig, Session, SessionStatus, User
+from app.routers import camera_config
 from app.schemas.schemas import SessionDetailOut, SessionOut, SessionStartRequest
 
 router = APIRouter(prefix="/sessions", tags=["sessions"])
@@ -172,6 +173,17 @@ async def start_session(
     session_name = body.name.strip() if body.name else ""
     if not session_name:
         session_name = f"Session {now.strftime('%b %d, %Y %I:%M %p')}"
+
+    try:
+        await camera_config.push_saved_camera_config(db)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Camera config apply failed before recording")
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Failed to apply saved camera config: {exc}",
+        )
 
     session = Session(
         user_id=current_user.id,

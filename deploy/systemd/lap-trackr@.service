@@ -1,0 +1,22 @@
+[Unit]
+Description=Lap-Trackr Docker stack for %i
+Requires=docker.service
+Wants=network-online.target nvargus-daemon.service zed_x_daemon.service
+After=network-online.target docker.service nvargus-daemon.service zed_x_daemon.service
+RequiresMountsFor=/data
+ConditionPathExists=/home/%i/lap-trackr/docker-compose.yml
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/home/%i/lap-trackr
+ExecStartPre=/usr/bin/test -x /home/%i/lap-trackr/scripts/wait_for_jetson_cameras.sh
+ExecStartPre=/usr/bin/bash /home/%i/lap-trackr/scripts/wait_for_jetson_cameras.sh
+ExecStart=/usr/bin/docker compose up -d --remove-orphans
+ExecReload=/usr/bin/docker compose up -d --remove-orphans
+ExecStop=/usr/bin/docker compose down
+TimeoutStartSec=0
+TimeoutStopSec=120
+
+[Install]
+WantedBy=multi-user.target

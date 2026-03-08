@@ -57,77 +57,23 @@ class CameraManager:
         self._grab_thread: threading.Thread | None = None
         self._grab_stop_event = threading.Event()
 
+        # Background retry loop for cameras that were not ready at startup.
+        self._open_retry_thread: threading.Thread | None = None
+        self._open_retry_stop_event = threading.Event()
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
 
     def open_cameras(self) -> None:
-        """Open every configured camera.  Called once at startup."""
-        for name, serial in self.serials.items():
-            if not serial:
-                print(f"[camera_manager] {name} serial not configured, skipping")
-                continue
-            cam = sl.Camera()
-            init_params = sl.InitParameters()
-            init_params.camera_resolution = sl.RESOLUTION.HD1200
-            init_params.camera_fps = 30
-            init_params.depth_mode = sl.DEPTH_MODE.NONE
-            init_params.set_from_serial_number(int(serial))
-            status = cam.open(init_params)
-            if status != sl.ERROR_CODE.SUCCESS:
-                print(
-                    f"[camera_manager] Failed to open {name} "
-                    f"(serial {serial}): {status}"
-                )
-                continue
-            try:
-                self.cameras[name] = cam
-                self._locks[name] = threading.Lock()
-                self._latest_images[name] = sl.Mat()
-                self._streaming_mats[name] = sl.Mat()
-
-                # Extract factory-calibrated intrinsics from the ZED SDK
-                try:
-                    cam_info = cam.get_camera_information()
-                    calib = cam_info.camera_configuration.calibration_parameters
-                    left = calib.left_cam
-                    right = calib.right_cam
-                    res = cam_info.camera_configuration.resolution
-                    left_intrinsics = self._build_intrinsics(left, res)
-                    right_intrinsics = self._build_intrinsics(right, res)
-                    self._intrinsics_by_eye[name] = {
-                        "left": left_intrinsics,
-                        "right": right_intrinsics,
-                    }
-                    self._intrinsics[name] = left_intrinsics
-                    self._camera_info[name] = {
-                        "serial": serial,
-                        "resolution": [int(res.width), int(res.height)],
-                        "fps": 30,
-                    }
-                    print(
-                        f"[camera_manager] {name} intrinsics: "
-                        f"left=({left.fx:.1f}, {left.fy:.1f}, {left.cx:.1f}, {left.cy:.1f}) "
-                        f"right=({right.fx:.1f}, {right.fy:.1f}, {right.cx:.1f}, {right.cy:.1f}) "
-                        f"res={res.width}x{res.height}"
-                    )
-                except Exception as exc:
-                    print(f"[camera_manager] Warning: could not extract intrinsics for {name}: {exc}")
-
-                print(f"[camera_manager] Opened {name} (serial {serial})")
-            except Exception as exc:
-                print(f"[camera_manager] Error setting up {name}, closing: {exc}")
-                cam.close()
-                self.cameras.pop(name, None)
-                self._locks.pop(name, None)
-                self._latest_images.pop(name, None)
-                self._streaming_mats.pop(name, None)
-                self._intrinsics.pop(name, None)
-                self._intrinsics_by_eye.pop(name, None)
-                self._camera_info.pop(name, None)
+        """Open configured cameras and keep retrying any missing devices."""
+        self._attempt_open_missing_cameras()
+        if self._missing_serials():
+            self._start_open_retry_thread()
 
     def close(self) -> None:
         """Stop any active recording and close every camera."""
+        self._stop_open_retry_thread()
         if self.recording:
             self.stop_recording()
         # Ensure grab thread is fully stopped before clearing state,
@@ -262,6 +208,37 @@ class CameraManager:
             self._grab_stop_event.set()
             self._grab_thread.join(timeout=5.0)
             self._grab_thread = None
+
+    def _start_open_retry_thread(self) -> None:
+        if self._open_retry_thread is not None and self._open_retry_thread.is_alive():
+            return
+        self._open_retry_stop_event.clear()
+        self._open_retry_thread = threading.Thread(
+            target=self._open_retry_loop,
+            daemon=True,
+            name="zed-open-retry",
+        )
+        self._open_retry_thread.start()
+
+    def _stop_open_retry_thread(self) -> None:
+        if self._open_retry_thread is not None and self._open_retry_thread.is_alive():
+            self._open_retry_stop_event.set()
+            self._open_retry_thread.join(timeout=5.0)
+        self._open_retry_thread = None
+
+    def _open_retry_loop(self) -> None:
+        while not self._open_retry_stop_event.is_set():
+            missing = self._missing_serials()
+            if not missing:
+                return
+            print(
+                "[camera_manager] Retrying missing cameras: "
+                + ", ".join(f"{name}={serial}" for name, serial in missing.items())
+            )
+            self._attempt_open_missing_cameras()
+            if not self._missing_serials():
+                return
+            self._open_retry_stop_event.wait(config.ZED_OPEN_RETRY_INTERVAL_S)
 
     def _grab_loop(self) -> None:
         """Continuously call ``grab()`` on every open camera.
@@ -498,3 +475,95 @@ class CameraManager:
     def _disable_all_recording(self) -> None:
         for cam in self.cameras.values():
             cam.disable_recording()
+
+    def _missing_serials(self) -> dict[str, str]:
+        missing: dict[str, str] = {}
+        for name, serial in self.serials.items():
+            if not serial:
+                continue
+            if name not in self.cameras:
+                missing[name] = serial
+        return missing
+
+    def _attempt_open_missing_cameras(self) -> None:
+        missing = self._missing_serials()
+        if not missing:
+            return
+
+        available_devices = self.list_cameras()
+        if available_devices:
+            print(f"[camera_manager] Visible ZED devices: {available_devices}")
+        else:
+            print("[camera_manager] Visible ZED devices: none")
+
+        for name, serial in missing.items():
+            if name in self.cameras:
+                continue
+            self._open_single_camera(name, serial)
+
+    def _open_single_camera(self, name: str, serial: str) -> None:
+        cam = sl.Camera()
+        init_params = sl.InitParameters()
+        init_params.camera_resolution = sl.RESOLUTION.HD1200
+        init_params.camera_fps = 30
+        init_params.depth_mode = sl.DEPTH_MODE.NONE
+        init_params.set_from_serial_number(int(serial))
+        status = cam.open(init_params)
+        if status != sl.ERROR_CODE.SUCCESS:
+            print(
+                f"[camera_manager] Failed to open {name} "
+                f"(serial {serial}): {status}"
+            )
+            try:
+                cam.close()
+            except Exception:
+                pass
+            return
+
+        try:
+            with self._camera_lock:
+                self.cameras[name] = cam
+                self._locks[name] = threading.Lock()
+                self._latest_images[name] = sl.Mat()
+                self._streaming_mats[name] = sl.Mat()
+
+            # Extract factory-calibrated intrinsics from the ZED SDK
+            try:
+                cam_info = cam.get_camera_information()
+                calib = cam_info.camera_configuration.calibration_parameters
+                left = calib.left_cam
+                right = calib.right_cam
+                res = cam_info.camera_configuration.resolution
+                left_intrinsics = self._build_intrinsics(left, res)
+                right_intrinsics = self._build_intrinsics(right, res)
+                self._intrinsics_by_eye[name] = {
+                    "left": left_intrinsics,
+                    "right": right_intrinsics,
+                }
+                self._intrinsics[name] = left_intrinsics
+                self._camera_info[name] = {
+                    "serial": serial,
+                    "resolution": [int(res.width), int(res.height)],
+                    "fps": 30,
+                }
+                print(
+                    f"[camera_manager] {name} intrinsics: "
+                    f"left=({left.fx:.1f}, {left.fy:.1f}, {left.cx:.1f}, {left.cy:.1f}) "
+                    f"right=({right.fx:.1f}, {right.fy:.1f}, {right.cx:.1f}, {right.cy:.1f}) "
+                    f"res={res.width}x{res.height}"
+                )
+            except Exception as exc:
+                print(f"[camera_manager] Warning: could not extract intrinsics for {name}: {exc}")
+
+            print(f"[camera_manager] Opened {name} (serial {serial})")
+        except Exception as exc:
+            print(f"[camera_manager] Error setting up {name}, closing: {exc}")
+            cam.close()
+            with self._camera_lock:
+                self.cameras.pop(name, None)
+                self._locks.pop(name, None)
+                self._latest_images.pop(name, None)
+                self._streaming_mats.pop(name, None)
+            self._intrinsics.pop(name, None)
+            self._intrinsics_by_eye.pop(name, None)
+            self._camera_info.pop(name, None)

@@ -188,7 +188,41 @@ docker compose up -d
 
 First build takes 15-30 minutes (downloads ZED SDK base images, compiles PyTorch wheels).
 
-### 4. Verify
+### 4. Install Boot-Time Service
+
+The Jetson camera stack is sensitive to boot timing. Lap-Trackr should start only after:
+
+1. `nvargus-daemon`
+2. `zed_x_daemon`
+3. `/dev/video0`-`/dev/video3` are present
+4. then `docker compose up -d`
+
+Install the templated systemd unit included in the repo:
+
+```bash
+cd ~/lap-trackr
+chmod +x scripts/wait_for_jetson_cameras.sh scripts/restart_cameras.sh
+
+sudo cp deploy/systemd/lap-trackr@.service /etc/systemd/system/
+sudo systemctl daemon-reload
+
+# Make sure the camera host daemons are enabled on boot
+sudo systemctl enable nvargus-daemon.service zed_x_daemon.service
+
+# Enable Lap-Trackr for your Linux username
+sudo systemctl enable --now lap-trackr@$USER.service
+```
+
+Verify the service:
+
+```bash
+systemctl status lap-trackr@$USER.service --no-pager
+journalctl -u lap-trackr@$USER.service -b --no-pager
+```
+
+If you installed the repo somewhere other than `/home/$USER/lap-trackr`, edit `/etc/systemd/system/lap-trackr@.service` before enabling it.
+
+### 5. Verify
 
 ```bash
 # Check all services are healthy
@@ -201,7 +235,7 @@ curl http://localhost/api/health/system | python3 -m json.tool
 # Navigate to http://<jetson-ip> in a browser
 ```
 
-### 5. Create a User Account
+### 6. Create a User Account
 
 Open `http://<jetson-ip>` in a browser and click "Register" to create your first account.
 
@@ -224,7 +258,7 @@ See [Calibration Guide](calibration.md) for the full workflow. In short:
 cd ~/lap-trackr
 git pull
 docker compose build
-docker compose up -d
+sudo systemctl restart lap-trackr@$USER.service
 ```
 
 ### Viewing Logs
@@ -237,6 +271,9 @@ docker compose logs -f
 docker compose logs -f api
 docker compose logs -f grader
 docker compose logs -f exporter
+
+# Boot sequencing / host startup
+journalctl -u lap-trackr@$USER.service -b -f
 ```
 
 ### Database Backup
