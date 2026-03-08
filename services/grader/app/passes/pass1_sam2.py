@@ -87,11 +87,22 @@ def _segment_view_inner(
 
     Progress is reported as (base_offset + step, total_steps) so the caller
     can combine on-axis and off-axis progress into a single consistent range.
+
+    Uses streaming merge: forward masks are RLE-encoded immediately (~8x
+    smaller), then merged one-at-a-time during backward propagation.  This
+    avoids materializing two full-resolution mask dicts (~16 GB at 4k frames).
     """
     import torch
 
-    # Each view has forward + backward propagation = 2 * n_frames steps
-    view_steps = n_frames * 2
+    # Build reverse mapping: obj_id → label
+    obj_to_label = {}
+    for label, obj_id in _LABEL_OBJ_IDS.items():
+        if label in tip_points:
+            obj_to_label[obj_id] = label
+
+    masks_by_label: dict[str, list[np.ndarray | None]] = {
+        label: [None] * n_frames for label in tip_points
+    }
 
     with torch.inference_mode():
         if on_progress:
@@ -118,56 +129,48 @@ def _segment_view_inner(
                 labels=labels,
             )
 
-        # Forward propagation
-        forward_results: dict[int, dict[int, np.ndarray]] = {}
+        # Forward propagation — store as RLE immediately to save memory
+        forward_rle: dict[int, dict[int, np.ndarray]] = {}
         for frame_idx, obj_ids, masks in predictor.propagate_in_video(
             inference_state=inference_state,
         ):
-            frame_masks = {}
+            frame_rle = {}
             for i, oid in enumerate(obj_ids):
                 mask = (masks[i, 0] > 0.0).cpu().numpy().astype(np.uint8)
-                frame_masks[oid] = mask
-            forward_results[frame_idx] = frame_masks
+                frame_rle[oid] = _encode_rle(mask)
+            forward_rle[frame_idx] = frame_rle
             if on_progress:
                 on_progress(base_offset + frame_idx + 1, total_steps)
 
-        # Backward propagation
-        backward_results: dict[int, dict[int, np.ndarray]] = {}
+        # Backward propagation — merge with forward immediately, encode to RLE
         for frame_idx, obj_ids, masks in predictor.propagate_in_video(
             inference_state=inference_state,
             reverse=True,
         ):
-            frame_masks = {}
+            fwd_frame = forward_rle.pop(frame_idx, {})
             for i, oid in enumerate(obj_ids):
-                mask = (masks[i, 0] > 0.0).cpu().numpy().astype(np.uint8)
-                frame_masks[oid] = mask
-            backward_results[frame_idx] = frame_masks
+                label = obj_to_label.get(oid)
+                if label is None:
+                    continue
+                bwd = (masks[i, 0] > 0.0).cpu().numpy().astype(np.uint8)
+                fwd_rle = fwd_frame.get(oid)
+                if fwd_rle is not None:
+                    fwd = _decode_rle(fwd_rle, bwd.shape)
+                    merged = np.maximum(fwd, bwd)
+                else:
+                    merged = bwd
+                masks_by_label[label][frame_idx] = _encode_rle(merged)
             if on_progress:
                 on_progress(base_offset + n_frames + frame_idx + 1, total_steps)
 
+        # Forward-only frames (not visited by backward propagation)
+        for fidx, frame_rle in forward_rle.items():
+            for oid, rle in frame_rle.items():
+                label = obj_to_label.get(oid)
+                if label is not None and masks_by_label[label][fidx] is None:
+                    masks_by_label[label][fidx] = rle
+
         predictor.reset_state(inference_state)
-
-    # Merge forward and backward results (union)
-    masks_by_label: dict[str, list[np.ndarray | None]] = {
-        label: [None] * n_frames for label in tip_points
-    }
-
-    for label, obj_id in _LABEL_OBJ_IDS.items():
-        if label not in tip_points:
-            continue
-        for fidx in range(n_frames):
-            fwd = forward_results.get(fidx, {}).get(obj_id)
-            bwd = backward_results.get(fidx, {}).get(obj_id)
-            if fwd is not None and bwd is not None:
-                merged = np.maximum(fwd, bwd)
-            elif fwd is not None:
-                merged = fwd
-            elif bwd is not None:
-                merged = bwd
-            else:
-                continue
-            # Encode as RLE for memory efficiency
-            masks_by_label[label][fidx] = _encode_rle(merged)
 
     return masks_by_label
 
@@ -175,6 +178,7 @@ def _segment_view_inner(
 def run(
     data: PassData,
     on_progress: Callable[[str, int, int, str], None] | None = None,
+    cameras: set[str] | None = None,
 ) -> bool:
     """Execute Pass 1: SAM2 video segmentation.
 
@@ -182,18 +186,25 @@ def run(
     """
     import torch
 
-    logger.info("Pass 1: SAM2 segmentation starting")
+    process_on = cameras is None or "on_axis" in cameras
+    process_off = cameras is None or "off_axis" in cameras
+    logger.info("Pass 1: SAM2 segmentation starting (cameras=%s)",
+                "all" if cameras is None else cameras)
 
     sample_interval = int(os.environ.get("FRAME_SAMPLE_INTERVAL", "5"))
 
     # Load tip points separately for each camera view with resolved frame indices
-    on_tip_points, on_fallback = load_tip_points(
-        data.session_dir, "on_axis", sample_interval, n_frames=len(data.on_frames),
-        frame_indices=data.on_frame_indices or None,
+    on_tip_points, on_fallback = (
+        load_tip_points(
+            data.session_dir, "on_axis", sample_interval, n_frames=len(data.on_frames),
+            frame_indices=data.on_frame_indices or None,
+        ) if process_on and data.on_frames else ({}, False)
     )
-    off_tip_points, off_fallback = load_tip_points(
-        data.session_dir, "off_axis", sample_interval, n_frames=len(data.off_frames),
-        frame_indices=data.off_frame_indices or None,
+    off_tip_points, off_fallback = (
+        load_tip_points(
+            data.session_dir, "off_axis", sample_interval, n_frames=len(data.off_frames),
+            frame_indices=data.off_frame_indices or None,
+        ) if process_off and data.off_frames else ({}, False)
     )
     used_fallback = on_fallback or off_fallback
 
@@ -232,9 +243,9 @@ def run(
         device=device,
     )
 
-    # Total steps = (forward + backward) for on-axis + (forward + backward) for off-axis
-    on_steps = len(data.on_frames) * 2
-    off_steps = len(data.off_frames) * 2
+    # Total steps = (forward + backward) for each active camera
+    on_steps = len(data.on_frames) * 2 if process_on else 0
+    off_steps = len(data.off_frames) * 2 if process_off else 0
     total_steps = on_steps + off_steps
 
     try:

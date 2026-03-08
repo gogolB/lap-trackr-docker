@@ -25,6 +25,7 @@ def load_svo2(
     on_progress: Callable[[int, int], None] | None = None,
     camera_config: dict | None = None,
     extra_frames: set[int] | None = None,
+    load_depth: bool = True,
 ) -> Tuple[List[np.ndarray], List[np.ndarray], float, List[int]]:
     """Open an SVO2 file and return sampled frames, depth maps, FPS, and indices.
 
@@ -66,6 +67,7 @@ def load_svo2(
         on_progress=on_progress,
         camera_config=camera_config,
         extra_frames=_extra,
+        load_depth=load_depth,
     )
     if export_result is not None:
         return export_result
@@ -83,6 +85,8 @@ def load_svo2(
         )
         synth_frames, synth_depths, synth_fps = _generate_synthetic_data(sample_interval)
         synth_indices = list(range(0, len(synth_frames) * sample_interval, sample_interval))
+        if not load_depth:
+            synth_depths = []
         return synth_frames, synth_depths, synth_fps, synth_indices
 
     # --- ZED SDK path -------------------------------------------------------
@@ -130,13 +134,16 @@ def load_svo2(
 
         if frame_idx % sample_interval == 0 or frame_idx in _extra:
             camera.retrieve_image(image_mat, view)
-            camera.retrieve_measure(depth_mat, depth_measure)
 
             # .get_data() returns a numpy view; copy to own the memory.
             frame = np.array(image_mat.get_data()[:, :, :3], dtype=np.uint8)
-            depth = np.array(depth_mat.get_data(), dtype=np.float32)
             frames.append(apply_transforms(frame, transform))
-            depth_maps.append(apply_transforms(depth, transform))
+
+            if load_depth:
+                camera.retrieve_measure(depth_mat, depth_measure)
+                depth = np.array(depth_mat.get_data(), dtype=np.float32)
+                depth_maps.append(apply_transforms(depth, transform))
+
             original_indices.append(frame_idx)
 
         current = frame_idx + 1
@@ -169,6 +176,7 @@ def _try_load_from_exports(
     on_progress: Callable[[int, int], None] | None = None,
     camera_config: dict | None = None,
     extra_frames: set[int] | None = None,
+    load_depth: bool = True,
 ) -> Tuple[List[np.ndarray], List[np.ndarray], float, List[int]] | None:
     """Try to load frames and depth from exported MP4 + NPZ files.
 
@@ -202,10 +210,15 @@ def _try_load_from_exports(
             )
     npz_path = session_dir / f"{cam_name}_depth.npz"
 
-    if not mp4_path.exists() or not npz_path.exists():
+    if not mp4_path.exists():
+        return None
+    if load_depth and not npz_path.exists():
         return None
 
-    logger.info("Loading from exports: %s + %s", mp4_path, npz_path)
+    logger.info(
+        "Loading from exports: %s%s", mp4_path,
+        f" + {npz_path}" if load_depth else " (frames only)",
+    )
 
     # Load video frames
     cap = cv2.VideoCapture(str(mp4_path))
@@ -222,9 +235,12 @@ def _try_load_from_exports(
         if total_frames <= 0:
             total_frames = 0
 
-        # Load depth arrays
-        depth_data = np.load(str(npz_path))
-        depth_keys = sorted(depth_data.files)
+        # Load depth arrays (deferred when load_depth=False)
+        if load_depth:
+            depth_data = np.load(str(npz_path))
+            depth_keys = sorted(depth_data.files)
+        else:
+            depth_keys = []
 
         _extra = extra_frames or set()
 
@@ -240,22 +256,27 @@ def _try_load_from_exports(
 
             if frame_idx % sample_interval == 0 or frame_idx in _extra:
                 frame = bgr.copy()
-                key = f"frame_{frame_idx:06d}"
-                if key in depth_data:
-                    depth = depth_data[key].astype(np.float32)
-                elif frame_idx < len(depth_keys):
-                    depth = depth_data[depth_keys[frame_idx]].astype(np.float32)
+
+                if load_depth and depth_data is not None:
+                    key = f"frame_{frame_idx:06d}"
+                    if key in depth_data:
+                        depth = depth_data[key].astype(np.float32)
+                    elif frame_idx < len(depth_keys):
+                        depth = depth_data[depth_keys[frame_idx]].astype(np.float32)
+                    else:
+                        h, w = bgr.shape[:2]
+                        depth = np.zeros((h, w), dtype=np.float32)
                 else:
-                    # No depth for this frame, use zeros
-                    h, w = bgr.shape[:2]
-                    depth = np.zeros((h, w), dtype=np.float32)
+                    depth = None
 
                 if not exports_transformed:
                     frame = apply_transforms(frame, transform)
-                    depth = apply_transforms(depth, transform)
+                    if depth is not None:
+                        depth = apply_transforms(depth, transform)
 
                 frames.append(frame)
-                depth_maps.append(depth)
+                if depth is not None:
+                    depth_maps.append(depth)
                 original_indices.append(frame_idx)
 
             current = frame_idx + 1
@@ -287,6 +308,7 @@ def load_frames_list(
     on_progress: Callable[[int, int], None] | None = None,
     camera_config: dict | None = None,
     extra_frames: set[int] | None = None,
+    load_depth: bool = True,
 ) -> Tuple[List[np.ndarray], List[np.ndarray], float, List[int]]:
     """Convenience wrapper that returns frames and depth for in-memory processing.
 
@@ -299,7 +321,78 @@ def load_frames_list(
         on_progress=on_progress,
         camera_config=camera_config,
         extra_frames=extra_frames,
+        load_depth=load_depth,
     )
+
+
+# ---------------------------------------------------------------------------
+# Deferred depth loading
+# ---------------------------------------------------------------------------
+
+def load_depth_maps(
+    svo_path: str,
+    original_indices: list[int],
+    camera_config: dict | None = None,
+    on_progress: Callable[[int, int], None] | None = None,
+) -> list[np.ndarray]:
+    """Load depth maps for previously-loaded frames (deferred depth loading).
+
+    Reads the NPZ depth export file and returns float32 depth arrays
+    corresponding to the given *original_indices*.
+    """
+    session_dir = Path(svo_path).parent
+    cam_name = Path(svo_path).stem
+    transform = get_camera_transform(camera_config, cam_name)
+
+    export_meta_path = session_dir / f"{cam_name}_export.json"
+    exports_transformed = False
+    if export_meta_path.exists():
+        try:
+            meta = json.loads(export_meta_path.read_text())
+            exports_transformed = bool(meta.get("transforms_applied"))
+        except Exception:
+            pass
+
+    npz_path = session_dir / f"{cam_name}_depth.npz"
+    if not npz_path.exists():
+        logger.warning("No depth file found at %s", npz_path)
+        return []
+
+    logger.info("Loading %d depth maps from %s", len(original_indices), npz_path)
+
+    depth_data = np.load(str(npz_path))
+    try:
+        depth_keys = sorted(depth_data.files)
+        depth_maps: list[np.ndarray] = []
+        total = len(original_indices)
+        fallback_shape: tuple[int, int] | None = None
+
+        for i, frame_idx in enumerate(original_indices):
+            key = f"frame_{frame_idx:06d}"
+            if key in depth_data:
+                depth = depth_data[key].astype(np.float32)
+            elif frame_idx < len(depth_keys):
+                depth = depth_data[depth_keys[frame_idx]].astype(np.float32)
+            else:
+                if fallback_shape is None:
+                    fallback_shape = (
+                        depth_data[depth_keys[0]].shape[:2]
+                        if depth_keys else (720, 1280)
+                    )
+                depth = np.zeros(fallback_shape, dtype=np.float32)
+
+            if not exports_transformed:
+                depth = apply_transforms(depth, transform)
+
+            depth_maps.append(depth)
+
+            if on_progress and ((i + 1) % 100 == 0 or i + 1 == total):
+                on_progress(i + 1, total)
+
+        logger.info("Loaded %d depth maps", len(depth_maps))
+        return depth_maps
+    finally:
+        depth_data.close()
 
 
 # ---------------------------------------------------------------------------

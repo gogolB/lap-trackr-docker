@@ -1229,64 +1229,74 @@ def run_v2_pipeline(job: dict, on_progress: ProgressCallback = None) -> dict[str
             sorted(_on_extra), sorted(_off_extra),
         )
 
-    # Load frames (on-axis and off-axis in parallel — both are I/O-bound
-    # and release the GIL during video decode / depth decompression)
-    from concurrent.futures import ThreadPoolExecutor
+    # ── Memory-aware loading strategy ──────────────────────────────────
+    # At sample_interval=1 with ~4k frames per camera, all frames + depth
+    # can exceed 56 GB.  We stagger loading to keep peak RAM manageable:
+    #   1. Load on-axis frames only (no depth) → run Pass 1 on-axis
+    #   2. Load off-axis frames (no depth)     → run Pass 1 off-axis
+    #   3. Load depth for both cameras just before Pass 4 (triangulation)
+    #   4. Free depth after Pass 4, free frames after render
+    from app.svo_loader import load_depth_maps
 
-    logger.info("V2 Pipeline: Loading frames (parallel)")
+    # Phase 1: Load on-axis frames (depth deferred to pass 4)
+    logger.info("V2 Pipeline: Loading on-axis frames")
+    frames, _, fps, on_frame_indices = load_svo2(
+        on_axis_path,
+        on_progress=lambda c, t: _progress("load_on_axis", c, t, "video"),
+        camera_config=camera_config,
+        extra_frames=_on_extra or None,
+        load_depth=False,
+    )
+    logger.info("Loaded %d on-axis frames at %.1f fps", len(frames), fps)
 
-    def _load_on():
-        return load_svo2(
-            on_axis_path,
-            on_progress=lambda c, t: _progress("load_on_axis", c, t, "video + depth"),
-            camera_config=camera_config,
-            extra_frames=_on_extra or None,
-        )
-
-    def _load_off():
-        return load_svo2(
-            off_axis_path,
-            on_progress=lambda c, t: _progress("load_off_axis", c, t, "video + depth"),
-            camera_config=camera_config,
-            extra_frames=_off_extra or None,
-        )
-
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        on_future = pool.submit(_load_on)
-        off_future = pool.submit(_load_off)
-        frames, depth_maps, fps, on_frame_indices = on_future.result()
-        off_frames, off_depth, off_fps, off_frame_indices = off_future.result()
-
-    logger.info("Loaded %d on-axis, %d off-axis frames at %.1f fps", len(frames), len(off_frames), fps)
-
-    # Create PassData
     data = PassData(
         session_dir=session_dir,
         on_frames=frames,
-        off_frames=off_frames,
+        off_frames=[],
         fps=fps,
-        on_depth=depth_maps,
-        off_depth=off_depth,
         stereo_calib=stereo_calibration,
         on_calib=on_calibration,
         off_calib=off_calibration,
         on_frame_indices=on_frame_indices,
-        off_frame_indices=off_frame_indices,
     )
 
-    # Pass 1: Segmentation (SAM2 or SAM3)
+    # Pass 1 on-axis: SAM processes only on-axis (off_frames is empty)
     pass1_key = f"pass1_{seg_backend}"
     t0 = time.monotonic()
+    used_fallback = False
     try:
-        used_fallback = pass1_seg.run(data, on_progress=on_progress)
-        if used_fallback:
-            warnings.append(
-                f"{seg_backend.upper()} used auto-detected tip positions (tip_init.json not found). "
-                "For best results, confirm tip positions via the Initialize Tips page."
-            )
+        fb = pass1_seg.run(data, on_progress=on_progress, cameras={"on_axis"})
+        used_fallback = used_fallback or fb
     except Exception as exc:
-        logger.warning("Pass 1 (%s) failed: %s", seg_backend.upper(), exc, exc_info=True)
+        logger.warning("Pass 1 on-axis (%s) failed: %s", seg_backend.upper(), exc, exc_info=True)
         warnings.append(f"Pass 1 ({seg_backend.upper()}) failed: {exc}")
+
+    # Phase 2: Load off-axis frames (depth deferred)
+    logger.info("V2 Pipeline: Loading off-axis frames")
+    off_frames, _, off_fps, off_frame_indices = load_svo2(
+        off_axis_path,
+        on_progress=lambda c, t: _progress("load_off_axis", c, t, "video"),
+        camera_config=camera_config,
+        extra_frames=_off_extra or None,
+        load_depth=False,
+    )
+    data.off_frames = off_frames
+    data.off_frame_indices = off_frame_indices
+    logger.info("Loaded %d off-axis frames at %.1f fps", len(off_frames), off_fps)
+
+    # Pass 1 off-axis
+    try:
+        fb = pass1_seg.run(data, on_progress=on_progress, cameras={"off_axis"})
+        used_fallback = used_fallback or fb
+    except Exception as exc:
+        logger.warning("Pass 1 off-axis (%s) failed: %s", seg_backend.upper(), exc, exc_info=True)
+        warnings.append(f"Pass 1 ({seg_backend.upper()}) failed: {exc}")
+
+    if used_fallback:
+        warnings.append(
+            f"{seg_backend.upper()} used auto-detected tip positions (tip_init.json not found). "
+            "For best results, confirm tip positions via the Initialize Tips page."
+        )
     timings[pass1_key] = time.monotonic() - t0
     logger.info("Pass 1 timing: %.1fs", timings[pass1_key])
 
@@ -1360,6 +1370,19 @@ def run_v2_pipeline(job: dict, on_progress: ProgressCallback = None) -> dict[str
     timings["pass3_color"] = time.monotonic() - t0
     logger.info("Pass 3 timing: %.1fs", timings["pass3_color"])
 
+    # Phase 3: Load depth maps just before triangulation (deferred loading)
+    _progress("load_depth", 0, 2, "Loading depth maps")
+    data.on_depth = load_depth_maps(
+        on_axis_path, data.on_frame_indices, camera_config=camera_config,
+    )
+    _progress("load_depth", 1, 2, "Loading off-axis depth")
+    data.off_depth = load_depth_maps(
+        off_axis_path, data.off_frame_indices, camera_config=camera_config,
+    )
+    _progress("load_depth", 2, 2, "Depth maps loaded")
+    logger.info("Loaded %d on-axis + %d off-axis depth maps",
+                len(data.on_depth), len(data.off_depth))
+
     # Pass 4: Stereo triangulation (CPU)
     t0 = time.monotonic()
     try:
@@ -1369,6 +1392,11 @@ def run_v2_pipeline(job: dict, on_progress: ProgressCallback = None) -> dict[str
         warnings.append(f"Pass 4 (Triangulation) failed: {exc}")
     timings["pass4_triangulation"] = time.monotonic() - t0
     logger.info("Pass 4 timing: %.1fs", timings["pass4_triangulation"])
+
+    # Free depth maps — no longer needed after triangulation
+    data.on_depth.clear()
+    data.off_depth.clear()
+    logger.info("Freed depth maps from memory")
 
     # Pass 5: RTS smoothing (CPU)
     t0 = time.monotonic()
@@ -1430,6 +1458,11 @@ def run_v2_pipeline(job: dict, on_progress: ProgressCallback = None) -> dict[str
     timings["render_tracking"] = time.monotonic() - t0
     logger.info("Render tracking timing: %.1fs", timings["render_tracking"])
     _progress("render_tracking", 4, 4, "Tracking render complete")
+
+    # Free frame data — no longer needed after render
+    data.on_frames.clear()
+    data.off_frames.clear()
+    logger.info("Freed frame data from memory")
 
     # Convert PassData to poses format for metrics calculation
     # Use smoothed_3d if available, fall back to trajectories_3d
