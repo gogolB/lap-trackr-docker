@@ -163,6 +163,34 @@ def load_svo2(
 # Fallback: load from exported MP4 + NPZ files
 # ---------------------------------------------------------------------------
 
+def _preload_depth_arrays(
+    npz_path: str,
+    sample_interval: int,
+    total_frames: int,
+    extra_frames: set[int],
+) -> dict[int, np.ndarray]:
+    """Preload and decompress depth arrays in bulk.
+
+    Runs in a background thread so decompression overlaps with video decode.
+    Returns {frame_idx: depth_array} for all sampled frames.
+    """
+    depth_data = np.load(npz_path)
+    depth_keys = sorted(depth_data.files)
+    result: dict[int, np.ndarray] = {}
+    try:
+        for frame_idx in range(total_frames):
+            if frame_idx % sample_interval != 0 and frame_idx not in extra_frames:
+                continue
+            key = f"frame_{frame_idx:06d}"
+            if key in depth_data:
+                result[frame_idx] = depth_data[key].astype(np.float32)
+            elif frame_idx < len(depth_keys):
+                result[frame_idx] = depth_data[depth_keys[frame_idx]].astype(np.float32)
+    finally:
+        depth_data.close()
+    return result
+
+
 def _try_load_from_exports(
     svo_path: str,
     sample_interval: int,
@@ -174,6 +202,7 @@ def _try_load_from_exports(
 
     Returns None if the export files don't exist.
     """
+    from concurrent.futures import ThreadPoolExecutor
     from pathlib import Path
     import cv2
 
@@ -213,7 +242,6 @@ def _try_load_from_exports(
         logger.warning("Failed to open MP4 %s", mp4_path)
         return None
 
-    depth_data = None
     try:
         fps = cap.get(cv2.CAP_PROP_FPS)
         if fps <= 0:
@@ -222,14 +250,17 @@ def _try_load_from_exports(
         if total_frames <= 0:
             total_frames = 0
 
-        # Load depth arrays
-        depth_data = np.load(str(npz_path))
-        depth_keys = sorted(depth_data.files)
-
         _extra = extra_frames or set()
 
+        # Start depth decompression in a background thread so it overlaps
+        # with video decoding (both release the GIL in their C extensions).
+        executor = ThreadPoolExecutor(max_workers=1)
+        depth_future = executor.submit(
+            _preload_depth_arrays, str(npz_path), sample_interval,
+            total_frames, _extra,
+        )
+
         frames: list[np.ndarray] = []
-        depth_maps: list[np.ndarray] = []
         original_indices: list[int] = []
         frame_idx = 0
 
@@ -240,22 +271,9 @@ def _try_load_from_exports(
 
             if frame_idx % sample_interval == 0 or frame_idx in _extra:
                 frame = bgr.copy()
-                key = f"frame_{frame_idx:06d}"
-                if key in depth_data:
-                    depth = depth_data[key].astype(np.float32)
-                elif frame_idx < len(depth_keys):
-                    depth = depth_data[depth_keys[frame_idx]].astype(np.float32)
-                else:
-                    # No depth for this frame, use zeros
-                    h, w = bgr.shape[:2]
-                    depth = np.zeros((h, w), dtype=np.float32)
-
                 if not exports_transformed:
                     frame = apply_transforms(frame, transform)
-                    depth = apply_transforms(depth, transform)
-
                 frames.append(frame)
-                depth_maps.append(depth)
                 original_indices.append(frame_idx)
 
             current = frame_idx + 1
@@ -265,6 +283,22 @@ def _try_load_from_exports(
 
         if on_progress:
             on_progress(frame_idx, max(total_frames, frame_idx, 1))
+
+        # Wait for depth decompression to finish
+        depth_cache = depth_future.result()
+        executor.shutdown(wait=False)
+
+        # Build aligned depth_maps list from preloaded cache
+        depth_maps: list[np.ndarray] = []
+        for orig_idx in original_indices:
+            depth = depth_cache.get(orig_idx)
+            if depth is not None:
+                if not exports_transformed:
+                    depth = apply_transforms(depth, transform)
+                depth_maps.append(depth)
+            else:
+                h, w = frames[0].shape[:2] if frames else (720, 1280)
+                depth_maps.append(np.zeros((h, w), dtype=np.float32))
 
         n_extra_loaded = sum(1 for i in original_indices if i in _extra and i % sample_interval != 0)
         logger.info(
@@ -277,8 +311,6 @@ def _try_load_from_exports(
         return frames, depth_maps, fps, original_indices
     finally:
         cap.release()
-        if depth_data is not None:
-            depth_data.close()
 
 
 def load_frames_list(

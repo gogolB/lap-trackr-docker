@@ -334,7 +334,11 @@ def run(
                 logger.info("Segmenting on-axis view (%d frames)", len(data.on_frames))
                 on_frame_dir = _frames_to_jpeg_dir(data.on_frames)
                 try:
-                    on_state = predictor.init_state(video_path=on_frame_dir)
+                    on_state = predictor.init_state(
+                        video_path=on_frame_dir,
+                        offload_video_to_cpu=True,
+                        offload_state_to_cpu=True,
+                    )
                     data.on_masks = _segment_view_points(
                         predictor, on_state,
                         data.on_frames, on_tip_points,
@@ -354,7 +358,11 @@ def run(
                 logger.info("Segmenting off-axis view (%d frames)", len(data.off_frames))
                 off_frame_dir = _frames_to_jpeg_dir(data.off_frames)
                 try:
-                    off_state = predictor.init_state(video_path=off_frame_dir)
+                    off_state = predictor.init_state(
+                        video_path=off_frame_dir,
+                        offload_video_to_cpu=True,
+                        offload_state_to_cpu=True,
+                    )
                     data.off_masks = _segment_view_points(
                         predictor, off_state,
                         data.off_frames, off_tip_points,

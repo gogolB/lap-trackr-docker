@@ -1229,22 +1229,35 @@ def run_v2_pipeline(job: dict, on_progress: ProgressCallback = None) -> dict[str
             sorted(_on_extra), sorted(_off_extra),
         )
 
-    # Load frames
-    _progress("load_frames", 0, 2, "Loading on-axis frames")
-    logger.info("V2 Pipeline: Loading frames")
-    frames, depth_maps, fps, on_frame_indices = load_svo2(
-        on_axis_path,
-        on_progress=lambda c, t: _progress("load_frames", c, t, "Loading on-axis"),
-        camera_config=camera_config,
-        extra_frames=_on_extra or None,
-    )
-    _progress("load_frames", 1, 2, "Loading off-axis frames")
-    off_frames, off_depth, off_fps, off_frame_indices = load_svo2(
-        off_axis_path,
-        on_progress=lambda c, t: _progress("load_frames", c, t, "Loading off-axis"),
-        camera_config=camera_config,
-        extra_frames=_off_extra or None,
-    )
+    # Load frames (on-axis and off-axis in parallel — both are I/O-bound
+    # and release the GIL during video decode / depth decompression)
+    from concurrent.futures import ThreadPoolExecutor
+
+    _progress("load_frames", 0, 2, "Loading frames")
+    logger.info("V2 Pipeline: Loading frames (parallel)")
+
+    def _load_on():
+        return load_svo2(
+            on_axis_path,
+            on_progress=lambda c, t: _progress("load_frames", c, t, "Loading on-axis"),
+            camera_config=camera_config,
+            extra_frames=_on_extra or None,
+        )
+
+    def _load_off():
+        return load_svo2(
+            off_axis_path,
+            on_progress=lambda c, t: _progress("load_frames", c, t, "Loading off-axis"),
+            camera_config=camera_config,
+            extra_frames=_off_extra or None,
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        on_future = pool.submit(_load_on)
+        off_future = pool.submit(_load_off)
+        frames, depth_maps, fps, on_frame_indices = on_future.result()
+        off_frames, off_depth, off_fps, off_frame_indices = off_future.result()
+
     logger.info("Loaded %d on-axis, %d off-axis frames at %.1f fps", len(frames), len(off_frames), fps)
 
     # Create PassData
