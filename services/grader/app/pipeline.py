@@ -1233,13 +1233,12 @@ def run_v2_pipeline(job: dict, on_progress: ProgressCallback = None) -> dict[str
     # and release the GIL during video decode / depth decompression)
     from concurrent.futures import ThreadPoolExecutor
 
-    _progress("load_frames", 0, 2, "Loading frames")
     logger.info("V2 Pipeline: Loading frames (parallel)")
 
     def _load_on():
         return load_svo2(
             on_axis_path,
-            on_progress=lambda c, t: _progress("load_frames", c, t, "Loading on-axis"),
+            on_progress=lambda c, t: _progress("load_on_axis", c, t, "video + depth"),
             camera_config=camera_config,
             extra_frames=_on_extra or None,
         )
@@ -1247,7 +1246,7 @@ def run_v2_pipeline(job: dict, on_progress: ProgressCallback = None) -> dict[str
     def _load_off():
         return load_svo2(
             off_axis_path,
-            on_progress=lambda c, t: _progress("load_frames", c, t, "Loading off-axis"),
+            on_progress=lambda c, t: _progress("load_off_axis", c, t, "video + depth"),
             camera_config=camera_config,
             extra_frames=_off_extra or None,
         )
