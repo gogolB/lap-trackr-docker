@@ -9,56 +9,11 @@ from typing import Callable
 import numpy as np
 
 from app.passes.pass_data import PassData
+from app.passes.tip_loader import load_tip_points, validate_tip_color
 
 logger = logging.getLogger("grader.passes.pass1_sam2")
 
 _LABEL_OBJ_IDS = {"green_tip": 1, "pink_tip": 2}
-
-
-def _load_tip_points(session_dir) -> tuple[dict[str, tuple[float, float, int]], bool]:
-    """Load tip init points, preferring tip_init.json with fallback to tip_detections.json.
-
-    Returns ({label: (x, y, frame_idx)}, used_fallback) for each instrument.
-    """
-    import json
-    from pathlib import Path
-
-    tip_init_path = session_dir / "tip_init.json"
-    tip_detections_path = session_dir / "tip_detections.json"
-    used_fallback = False
-
-    if tip_init_path.exists():
-        tip_data = json.loads(tip_init_path.read_text())
-    elif tip_detections_path.exists():
-        logger.warning("tip_init.json not found, falling back to tip_detections.json")
-        tip_data = json.loads(tip_detections_path.read_text())
-        used_fallback = True
-    else:
-        raise FileNotFoundError(
-            f"Neither tip_init.json nor tip_detections.json found at {session_dir}"
-        )
-
-    best: dict[str, tuple[float, float, int]] = {}
-
-    for filename, detections in tip_data.items():
-        for det in detections:
-            label = det.get("label")
-            if label not in _LABEL_OBJ_IDS:
-                # Try color-based mapping
-                color = det.get("color")
-                if color == "green":
-                    label = "green_tip"
-                elif color == "pink":
-                    label = "pink_tip"
-                else:
-                    continue
-            x, y = float(det["x"]), float(det["y"])
-            confidence = float(det.get("confidence", 0.5))
-            prev = best.get(label)
-            if prev is None or confidence > prev[2]:
-                best[label] = (x, y, 0)  # frame_idx=0 as init frame
-
-    return best, used_fallback
 
 
 def _encode_rle(mask: np.ndarray) -> np.ndarray:
@@ -229,12 +184,28 @@ def run(
 
     logger.info("Pass 1: SAM2 segmentation starting")
 
-    tip_points, used_fallback = _load_tip_points(data.session_dir)
-    if not tip_points:
-        logger.warning("No tip init points found, skipping SAM2 pass")
+    sample_interval = int(os.environ.get("FRAME_SAMPLE_INTERVAL", "5"))
+
+    # Load tip points separately for each camera view with resolved frame indices
+    on_tip_points, on_fallback = load_tip_points(
+        data.session_dir, "on_axis", sample_interval, n_frames=len(data.on_frames),
+    )
+    off_tip_points, off_fallback = load_tip_points(
+        data.session_dir, "off_axis", sample_interval, n_frames=len(data.off_frames),
+    )
+    used_fallback = on_fallback or off_fallback
+
+    if not on_tip_points and not off_tip_points:
+        logger.warning("No tip init points found for either camera, skipping SAM2 pass")
         return used_fallback
 
-    logger.info("Tip init points: %s", {k: (v[0], v[1]) for k, v in tip_points.items()})
+    # Validate tip colors on the resolved frames
+    if data.on_frames and on_tip_points:
+        for label, (x, y, idx) in on_tip_points.items():
+            validate_tip_color(data.on_frames[idx], x, y, label)
+    if data.off_frames and off_tip_points:
+        for label, (x, y, idx) in off_tip_points.items():
+            validate_tip_color(data.off_frames[idx], x, y, label)
 
     # Load SAM2 model
     from app.config import SAM2_MODEL_PATH, SAM2_CONFIG_PATH
@@ -266,28 +237,34 @@ def run(
 
     try:
         # Segment on-axis view
-        logger.info("Segmenting on-axis view (%d frames)", len(data.on_frames))
-        data.on_masks = _segment_view(
-            predictor,
-            data.on_frames,
-            tip_points,
-            base_offset=0,
-            total_steps=total_steps,
-            on_progress=lambda c, t: on_progress("pass1_sam2", c, t, "SAM2 on-axis") if on_progress else None,
-        )
-        logger.info("On-axis masks: %s", {k: sum(1 for m in v if m is not None) for k, v in data.on_masks.items()})
+        if on_tip_points:
+            logger.info("Segmenting on-axis view (%d frames)", len(data.on_frames))
+            data.on_masks = _segment_view(
+                predictor,
+                data.on_frames,
+                on_tip_points,
+                base_offset=0,
+                total_steps=total_steps,
+                on_progress=lambda c, t: on_progress("pass1_sam2", c, t, "SAM2 on-axis") if on_progress else None,
+            )
+            logger.info("On-axis masks: %s", {k: sum(1 for m in v if m is not None) for k, v in data.on_masks.items()})
+        else:
+            logger.warning("No on-axis tip points, skipping on-axis segmentation")
 
         # Segment off-axis view
-        logger.info("Segmenting off-axis view (%d frames)", len(data.off_frames))
-        data.off_masks = _segment_view(
-            predictor,
-            data.off_frames,
-            tip_points,
-            base_offset=on_steps,
-            total_steps=total_steps,
-            on_progress=lambda c, t: on_progress("pass1_sam2", c, t, "SAM2 off-axis") if on_progress else None,
-        )
-        logger.info("Off-axis masks: %s", {k: sum(1 for m in v if m is not None) for k, v in data.off_masks.items()})
+        if off_tip_points:
+            logger.info("Segmenting off-axis view (%d frames)", len(data.off_frames))
+            data.off_masks = _segment_view(
+                predictor,
+                data.off_frames,
+                off_tip_points,
+                base_offset=on_steps,
+                total_steps=total_steps,
+                on_progress=lambda c, t: on_progress("pass1_sam2", c, t, "SAM2 off-axis") if on_progress else None,
+            )
+            logger.info("Off-axis masks: %s", {k: sum(1 for m in v if m is not None) for k, v in data.off_masks.items()})
+        else:
+            logger.warning("No off-axis tip points, skipping off-axis segmentation")
 
     finally:
         # Unload SAM2 to free GPU memory

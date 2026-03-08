@@ -1254,22 +1254,30 @@ def run_v2_pipeline(job: dict, on_progress: ProgressCallback = None) -> dict[str
     timings[pass1_key] = time.monotonic() - t0
     logger.info("Pass 1 timing: %.1fs", timings[pass1_key])
 
-    # Debug: render segmentation overlay videos
+    # Debug: render segmentation overlay videos (with tip init markers)
     if os.environ.get("_DEBUG_RENDER"):
         try:
             from app.debug_renderer import render_segmentation_video
+            from app.passes.tip_loader import load_tip_points as _load_debug_tips
+
             _progress("debug_render", 0, 2, "Rendering segmentation debug videos")
+            _si = int(os.environ.get("FRAME_SAMPLE_INTERVAL", "5"))
+
             if data.on_masks and frames:
+                _on_tips, _ = _load_debug_tips(session_dir, "on_axis", _si, n_frames=len(frames))
                 render_segmentation_video(
                     frames, data.on_masks,
                     str(results_dir / "debug_segmentation_on_axis.mp4"), fps,
                     camera_name="on_axis",
+                    tip_points=_on_tips or None,
                 )
             if data.off_masks and off_frames:
+                _off_tips, _ = _load_debug_tips(session_dir, "off_axis", _si, n_frames=len(off_frames))
                 render_segmentation_video(
                     off_frames, data.off_masks,
                     str(results_dir / "debug_segmentation_off_axis.mp4"), fps,
                     camera_name="off_axis",
+                    tip_points=_off_tips or None,
                 )
             _progress("debug_render", 2, 2, "Segmentation debug videos complete")
         except Exception as exc:

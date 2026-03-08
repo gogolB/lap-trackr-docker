@@ -46,11 +46,14 @@ def render_segmentation_video(
     output_path: str,
     fps: float,
     camera_name: str = "",
+    tip_points: dict[str, tuple[float, float, int]] | None = None,
 ) -> str:
     """Render a video with segmentation mask overlays.
 
     Each instrument's mask is shown as a colored transparent overlay,
-    with mask centroid marked by a crosshair.
+    with mask centroid marked by a crosshair.  If tip_points is provided,
+    the original click locations are drawn as diamond markers on the
+    frames where they were placed.
     """
     from app.passes.pass1_sam2 import _decode_rle
 
@@ -67,6 +70,27 @@ def render_segmentation_video(
     try:
         for fidx in range(n_frames):
             canvas = frames[fidx].copy()
+
+            # Draw tip_init click points (diamond marker on the init frame)
+            if tip_points:
+                for label, (tx, ty, init_frame) in tip_points.items():
+                    if fidx == init_frame:
+                        color = _MASK_COLORS.get(label, _DEFAULT_COLOR)
+                        px, py = int(round(tx)), int(round(ty))
+                        # Diamond shape
+                        size = 18
+                        pts = np.array([
+                            [px, py - size], [px + size, py],
+                            [px, py + size], [px - size, py],
+                        ], dtype=np.int32)
+                        cv2.polylines(canvas, [pts], True, (255, 255, 255), 4, cv2.LINE_AA)
+                        cv2.polylines(canvas, [pts], True, color, 2, cv2.LINE_AA)
+                        # Label
+                        text = f"INIT {label} ({px}, {py})"
+                        cv2.putText(canvas, text, (px + 22, py - 6),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 3, cv2.LINE_AA)
+                        cv2.putText(canvas, text, (px + 22, py - 6),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 1, cv2.LINE_AA)
 
             for label, mask_list in masks.items():
                 if fidx >= len(mask_list) or mask_list[fidx] is None:

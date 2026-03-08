@@ -18,6 +18,7 @@ import cv2
 import numpy as np
 
 from app.passes.pass_data import PassData
+from app.passes.tip_loader import load_tip_points, validate_tip_color
 
 logger = logging.getLogger("grader.passes.pass1_sam3")
 
@@ -28,49 +29,6 @@ _TEXT_PROMPTS = {
     "green_tip": "green surgical instrument tip",
     "pink_tip": "pink surgical instrument tip",
 }
-
-
-def _load_tip_points(session_dir) -> tuple[dict[str, tuple[float, float, int]], bool]:
-    """Load tip init points, preferring tip_init.json with fallback to tip_detections.json.
-
-    Returns ({label: (x, y, frame_idx)}, used_fallback) for each instrument.
-    """
-    import json
-    from pathlib import Path
-
-    tip_init_path = session_dir / "tip_init.json"
-    tip_detections_path = session_dir / "tip_detections.json"
-    used_fallback = False
-
-    if tip_init_path.exists():
-        tip_data = json.loads(tip_init_path.read_text())
-    elif tip_detections_path.exists():
-        logger.warning("tip_init.json not found, falling back to tip_detections.json")
-        tip_data = json.loads(tip_detections_path.read_text())
-        used_fallback = True
-    else:
-        return {}, True
-
-    best: dict[str, tuple[float, float, int]] = {}
-
-    for filename, detections in tip_data.items():
-        for det in detections:
-            label = det.get("label")
-            if label not in _LABEL_OBJ_IDS:
-                color = det.get("color")
-                if color == "green":
-                    label = "green_tip"
-                elif color == "pink":
-                    label = "pink_tip"
-                else:
-                    continue
-            x, y = float(det["x"]), float(det["y"])
-            confidence = float(det.get("confidence", 0.5))
-            prev = best.get(label)
-            if prev is None or confidence > prev[2]:
-                best[label] = (x, y, 0)
-
-    return best, used_fallback
 
 
 def _encode_rle(mask: np.ndarray) -> np.ndarray:
@@ -283,15 +241,31 @@ def run(
 
     logger.info("Pass 1: SAM3 segmentation starting")
 
-    tip_points, used_fallback = _load_tip_points(data.session_dir)
-    use_text_prompts = not tip_points
+    sample_interval = int(os.environ.get("FRAME_SAMPLE_INTERVAL", "5"))
+
+    # Load tip points separately for each camera view with resolved frame indices
+    on_tip_points, on_fallback = load_tip_points(
+        data.session_dir, "on_axis", sample_interval, n_frames=len(data.on_frames),
+    )
+    off_tip_points, off_fallback = load_tip_points(
+        data.session_dir, "off_axis", sample_interval, n_frames=len(data.off_frames),
+    )
+    used_fallback = on_fallback or off_fallback
+
+    use_text_prompts = not on_tip_points and not off_tip_points
 
     if use_text_prompts:
         logger.info("No tip init points found, using SAM3 text prompts")
         used_fallback = True
 
+    # Validate tip colors on the resolved frames
     if not use_text_prompts:
-        logger.info("Tip init points: %s", {k: (v[0], v[1]) for k, v in tip_points.items()})
+        if data.on_frames and on_tip_points:
+            for label, (x, y, idx) in on_tip_points.items():
+                validate_tip_color(data.on_frames[idx], x, y, label)
+        if data.off_frames and off_tip_points:
+            for label, (x, y, idx) in off_tip_points.items():
+                validate_tip_color(data.off_frames[idx], x, y, label)
 
     try:
         from sam3.model_builder import build_sam3_video_model, build_sam3_video_predictor
@@ -340,44 +314,48 @@ def run(
             del predictor
         else:
             # Point prompt path — uses SAM2-compatible tracker API
-            # build_sam3_video_model returns a model with .tracker (Sam3TrackerPredictor)
-            # which has init_state / add_new_points / propagate_in_video
             logger.info("Building SAM3 tracker (SAM2-compatible mode)")
             sam3_model = build_sam3_video_model()
             predictor = sam3_model.tracker
             predictor.backbone = sam3_model.detector.backbone
 
             # On-axis
-            logger.info("Segmenting on-axis view (%d frames)", len(data.on_frames))
-            on_frame_dir = _frames_to_jpeg_dir(data.on_frames)
-            try:
-                on_state = predictor.init_state(video_path=on_frame_dir)
-                data.on_masks = _segment_view_points(
-                    predictor, on_state,
-                    data.on_frames, tip_points,
-                    base_offset=0, total_steps=total_steps,
-                    on_progress=lambda c, t: on_progress("pass1_sam3", c, t, "SAM3 on-axis") if on_progress else None,
-                )
-                predictor.reset_state(on_state)
-            finally:
-                shutil.rmtree(on_frame_dir, ignore_errors=True)
-            logger.info("On-axis masks: %s", {k: sum(1 for m in v if m is not None) for k, v in data.on_masks.items()})
+            if on_tip_points:
+                logger.info("Segmenting on-axis view (%d frames)", len(data.on_frames))
+                on_frame_dir = _frames_to_jpeg_dir(data.on_frames)
+                try:
+                    on_state = predictor.init_state(video_path=on_frame_dir)
+                    data.on_masks = _segment_view_points(
+                        predictor, on_state,
+                        data.on_frames, on_tip_points,
+                        base_offset=0, total_steps=total_steps,
+                        on_progress=lambda c, t: on_progress("pass1_sam3", c, t, "SAM3 on-axis") if on_progress else None,
+                    )
+                    predictor.reset_state(on_state)
+                finally:
+                    shutil.rmtree(on_frame_dir, ignore_errors=True)
+                logger.info("On-axis masks: %s", {k: sum(1 for m in v if m is not None) for k, v in data.on_masks.items()})
+            else:
+                logger.warning("No on-axis tip points, skipping on-axis segmentation")
 
             # Off-axis
-            logger.info("Segmenting off-axis view (%d frames)", len(data.off_frames))
-            off_frame_dir = _frames_to_jpeg_dir(data.off_frames)
-            try:
-                off_state = predictor.init_state(video_path=off_frame_dir)
-                data.off_masks = _segment_view_points(
-                    predictor, off_state,
-                    data.off_frames, tip_points,
-                    base_offset=on_steps, total_steps=total_steps,
-                    on_progress=lambda c, t: on_progress("pass1_sam3", c, t, "SAM3 off-axis") if on_progress else None,
-                )
-                predictor.reset_state(off_state)
-            finally:
-                shutil.rmtree(off_frame_dir, ignore_errors=True)
-            logger.info("Off-axis masks: %s", {k: sum(1 for m in v if m is not None) for k, v in data.off_masks.items()})
+            if off_tip_points:
+                logger.info("Segmenting off-axis view (%d frames)", len(data.off_frames))
+                off_frame_dir = _frames_to_jpeg_dir(data.off_frames)
+                try:
+                    off_state = predictor.init_state(video_path=off_frame_dir)
+                    data.off_masks = _segment_view_points(
+                        predictor, off_state,
+                        data.off_frames, off_tip_points,
+                        base_offset=on_steps, total_steps=total_steps,
+                        on_progress=lambda c, t: on_progress("pass1_sam3", c, t, "SAM3 off-axis") if on_progress else None,
+                    )
+                    predictor.reset_state(off_state)
+                finally:
+                    shutil.rmtree(off_frame_dir, ignore_errors=True)
+                logger.info("Off-axis masks: %s", {k: sum(1 for m in v if m is not None) for k, v in data.off_masks.items()})
+            else:
+                logger.warning("No off-axis tip points, skipping off-axis segmentation")
 
             del predictor
             del sam3_model
