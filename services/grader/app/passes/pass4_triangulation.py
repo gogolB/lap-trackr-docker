@@ -1,4 +1,21 @@
-"""Pass 4 — Stereo triangulation (CPU only)."""
+"""Pass 4 — Depth-map back-projection with cross-camera validation.
+
+Each ZED camera already produces high-quality depth maps from its internal
+stereo pair.  Instead of trying DLT triangulation across two cameras that are
+~90° apart with different focal lengths (which fails catastrophically when
+CoTracker drifts on one view), we:
+
+1. Back-project the 2D track from each camera using its own depth map →
+   3D point in that camera's coordinate frame.
+2. Transform both points into the on-axis frame using stereo calibration.
+3. If both cameras have valid back-projections and they agree within a
+   threshold, average them (weighted by visibility confidence).
+4. If they disagree, use the higher-confidence single-camera estimate.
+5. If only one camera has a valid track + depth, use it directly.
+
+This eliminates the DLT failure mode entirely while using the best depth
+data available.
+"""
 
 from __future__ import annotations
 
@@ -12,57 +29,20 @@ from app.passes.pass_data import PassData
 
 logger = logging.getLogger("grader.passes.pass4_triangulation")
 
-_REPROJ_ERROR_THRESHOLD = 15.0  # pixels
 _VIS_THRESHOLD = 0.3
 
+# Physical depth range for the surgical training scene (metres).
+# ZED depth maps show 0.11–1.14 m; allow generous margin.
+_DEPTH_MIN = 0.05   # 5 cm
+_DEPTH_MAX = 3.0     # 3 m
 
-def _triangulate_dlt_svd(
-    pt_on: tuple[float, float],
-    pt_off: tuple[float, float],
-    P_on: np.ndarray,
-    P_off: np.ndarray,
-) -> np.ndarray | None:
-    """DLT triangulation via SVD for a single point correspondence.
-
-    Returns 3D point as (3,) array or None if degenerate.
-    """
-    x1, y1 = pt_on
-    x2, y2 = pt_off
-
-    A = np.array([
-        x1 * P_on[2] - P_on[0],
-        y1 * P_on[2] - P_on[1],
-        x2 * P_off[2] - P_off[0],
-        y2 * P_off[2] - P_off[1],
-    ], dtype=np.float64)
-
-    _, _, Vt = np.linalg.svd(A)
-    X = Vt[-1]
-    if abs(X[3]) < 1e-10:
-        return None
-
-    point = X[:3] / X[3]
-    if not all(math.isfinite(v) for v in point):
-        return None
-    return point
+# Maximum distance (metres) between the two cameras' 3D estimates for them
+# to be considered in agreement and averaged.  Beyond this, we take the one
+# with higher confidence.  50 mm is generous — real agreement is <10 mm.
+_CROSS_CAM_AGREE_THRESHOLD = 0.050  # 50 mm
 
 
-def _compute_reprojection_error(
-    point_3d: np.ndarray,
-    pt_2d: tuple[float, float],
-    P: np.ndarray,
-) -> float:
-    """Compute reprojection error for a 3D point projected through P."""
-    X_h = np.append(point_3d, 1.0)
-    projected = P @ X_h
-    if abs(projected[2]) < 1e-10:
-        return float("inf")
-    px = projected[0] / projected[2]
-    py = projected[1] / projected[2]
-    return float(math.hypot(px - pt_2d[0], py - pt_2d[1]))
-
-
-def _backproject_single_camera(
+def _backproject(
     x: float,
     y: float,
     depth_maps: list[np.ndarray],
@@ -72,8 +52,11 @@ def _backproject_single_camera(
     cx: float,
     cy: float,
 ) -> np.ndarray | None:
-    """Back-project a 2D point using depth map (single-camera fallback)."""
-    if frame_idx >= len(depth_maps):
+    """Back-project a 2D pixel to 3D using the camera's depth map.
+
+    Returns the 3D point in the camera's own coordinate frame, or None.
+    """
+    if frame_idx >= len(depth_maps) or len(depth_maps) == 0:
         return None
 
     from app.pose_estimator import _lookup_depth
@@ -83,19 +66,29 @@ def _backproject_single_camera(
         return None
 
     z = float(depth)
+    if z < _DEPTH_MIN or z > _DEPTH_MAX:
+        return None
+
     x3d = (x - cx) * z / fx
     y3d = (y - cy) * z / fy
     return np.array([x3d, y3d, z], dtype=np.float64)
+
+
+def _transform_point(point: np.ndarray, T: np.ndarray) -> np.ndarray:
+    """Apply a 4×4 rigid transform to a 3D point."""
+    p_h = np.array([point[0], point[1], point[2], 1.0], dtype=np.float64)
+    result = T @ p_h
+    return result[:3]
 
 
 def run(
     data: PassData,
     on_progress: Callable[[str, int, int, str], None] | None = None,
 ) -> None:
-    """Execute Pass 4: Stereo triangulation."""
+    """Execute Pass 4: Depth-map back-projection with cross-camera validation."""
     from app.config import CAMERA_FX, CAMERA_FY, CAMERA_CX, CAMERA_CY
 
-    logger.info("Pass 4: Stereo triangulation starting")
+    logger.info("Pass 4: Depth-map back-projection starting")
 
     labels = sorted(set(data.on_tracks.keys()) | set(data.off_tracks.keys()))
     if not labels:
@@ -110,27 +103,10 @@ def run(
         logger.warning("Zero frames, skipping triangulation")
         return
 
-    # Build projection matrices from calibration
-    has_stereo = (
-        data.stereo_calib is not None
-        and data.on_calib is not None
-        and data.off_calib is not None
-    )
+    # Camera intrinsics
+    has_calib = data.on_calib is not None and data.off_calib is not None
 
-    P_on = None
-    P_off = None
-    fx_on = fy_on = cx_on = cy_on = 0.0
-    fx_off = fy_off = cx_off = cy_off = 0.0
-
-    if has_stereo:
-        from app.fusion import _build_K
-
-        K_on = _build_K(data.on_calib)
-        K_off = _build_K(data.off_calib)
-        T_on_to_off = np.array(data.stereo_calib["T_on_to_off"], dtype=np.float64)
-        P_on = K_on @ np.eye(3, 4, dtype=np.float64)
-        P_off = K_off @ T_on_to_off[:3, :]
-
+    if has_calib:
         intr_on = data.on_calib["intrinsics"]
         fx_on, fy_on = float(intr_on["fx"]), float(intr_on["fy"])
         cx_on, cy_on = float(intr_on["cx"]), float(intr_on["cy"])
@@ -141,8 +117,18 @@ def run(
         fx_on, fy_on, cx_on, cy_on = CAMERA_FX, CAMERA_FY, CAMERA_CX, CAMERA_CY
         fx_off, fy_off, cx_off, cy_off = fx_on, fy_on, cx_on, cy_on
 
+    # Transform from off-axis camera frame to on-axis camera frame
+    T_off_to_on = None
+    if data.stereo_calib is not None:
+        T_on_to_off = np.array(data.stereo_calib["T_on_to_off"], dtype=np.float64)
+        T_off_to_on = np.linalg.inv(T_on_to_off)
+        logger.info(
+            "Cross-camera validation enabled (baseline: %.1f mm)",
+            np.linalg.norm(T_on_to_off[:3, 3]) * 1000,
+        )
+
     if on_progress:
-        on_progress("pass4_triangulation", 0, n_frames, "Triangulating 3D positions")
+        on_progress("pass4_triangulation", 0, n_frames, "Back-projecting 3D positions")
 
     for label in labels:
         on_track = data.on_tracks.get(label)
@@ -151,7 +137,12 @@ def run(
         off_vis = data.off_visibility.get(label)
 
         traj = np.full((n_frames, 3), np.nan, dtype=np.float64)
-        errors = np.full(n_frames, np.nan, dtype=np.float64)
+        # Track which method produced each point for diagnostics
+        n_fused = 0       # both cameras agreed → averaged
+        n_on_only = 0     # on-axis back-projection only
+        n_off_only = 0    # off-axis back-projection only
+        n_disagree = 0    # both valid but disagreed → used higher confidence
+        n_no_depth = 0    # track visible but no valid depth
 
         for fidx in range(n_frames):
             on_ok = (
@@ -171,61 +162,74 @@ def run(
                 and not np.any(np.isnan(off_track[fidx]))
             )
 
-            if on_ok and off_ok and has_stereo:
-                # Stereo DLT triangulation
-                pt_on = (float(on_track[fidx, 0]), float(on_track[fidx, 1]))
-                pt_off = (float(off_track[fidx, 0]), float(off_track[fidx, 1]))
-                point = _triangulate_dlt_svd(pt_on, pt_off, P_on, P_off)
-                if point is not None:
-                    err_on = _compute_reprojection_error(point, pt_on, P_on)
-                    err_off = _compute_reprojection_error(point, pt_off, P_off)
-                    mean_err = (err_on + err_off) / 2.0
-                    if mean_err <= _REPROJ_ERROR_THRESHOLD:
-                        traj[fidx] = point
-                        errors[fidx] = mean_err
-                        continue
+            # Back-project from each camera
+            pt_on = None
+            pt_off_in_on = None  # off-axis point transformed to on-axis frame
 
-            # Single-camera depth fallback
             if on_ok:
-                pt = _backproject_single_camera(
-                    float(on_track[fidx, 0]),
-                    float(on_track[fidx, 1]),
-                    data.on_depth,
-                    fidx,
+                pt_on = _backproject(
+                    float(on_track[fidx, 0]), float(on_track[fidx, 1]),
+                    data.on_depth, fidx,
                     fx_on, fy_on, cx_on, cy_on,
                 )
-                if pt is not None:
-                    traj[fidx] = pt
-                    errors[fidx] = 0.0  # no reprojection error for monocular
-                    continue
 
             if off_ok:
-                pt = _backproject_single_camera(
-                    float(off_track[fidx, 0]),
-                    float(off_track[fidx, 1]),
-                    data.off_depth,
-                    fidx,
+                pt_off_local = _backproject(
+                    float(off_track[fidx, 0]), float(off_track[fidx, 1]),
+                    data.off_depth, fidx,
                     fx_off, fy_off, cx_off, cy_off,
                 )
-                if pt is not None:
-                    traj[fidx] = pt
-                    errors[fidx] = 0.0
+                if pt_off_local is not None and T_off_to_on is not None:
+                    pt_off_in_on = _transform_point(pt_off_local, T_off_to_on)
+
+            # Fuse the two estimates
+            if pt_on is not None and pt_off_in_on is not None:
+                dist = float(np.linalg.norm(pt_on - pt_off_in_on))
+                if dist <= _CROSS_CAM_AGREE_THRESHOLD:
+                    # Agreement — visibility-weighted average
+                    w_on = float(on_vis[fidx])
+                    w_off = float(off_vis[fidx])
+                    total_w = w_on + w_off
+                    traj[fidx] = (pt_on * w_on + pt_off_in_on * w_off) / total_w
+                    n_fused += 1
+                else:
+                    # Disagreement — use higher confidence estimate
+                    if on_vis[fidx] >= off_vis[fidx]:
+                        traj[fidx] = pt_on
+                    else:
+                        traj[fidx] = pt_off_in_on
+                    n_disagree += 1
+            elif pt_on is not None:
+                traj[fidx] = pt_on
+                n_on_only += 1
+            elif pt_off_in_on is not None:
+                traj[fidx] = pt_off_in_on
+                n_off_only += 1
+            elif on_ok or off_ok:
+                n_no_depth += 1
 
             if on_progress and (fidx + 1) % 50 == 0:
-                on_progress("pass4_triangulation", fidx + 1, n_frames, f"Triangulating {label}")
+                on_progress("pass4_triangulation", fidx + 1, n_frames, f"Back-projecting {label}")
 
         data.trajectories_3d[label] = traj
-        data.reprojection_errors[label] = errors
 
-        valid_count = np.sum(~np.isnan(traj[:, 0]))
+        valid_count = int(np.sum(~np.isnan(traj[:, 0])))
         logger.info(
-            "%s: %d/%d frames with valid 3D positions (mean reproj err: %.2f px)",
-            label,
-            valid_count,
-            n_frames,
-            float(np.nanmean(errors)) if valid_count > 0 else 0.0,
+            "%s: %d/%d valid — %d fused, %d on-only, %d off-only, "
+            "%d disagreed, %d no-depth",
+            label, valid_count, n_frames,
+            n_fused, n_on_only, n_off_only, n_disagree, n_no_depth,
         )
 
+        if valid_count > 0:
+            valid_pts = traj[~np.isnan(traj[:, 0])]
+            logger.info(
+                "%s depth stats: min=%.3fm, max=%.3fm, median=%.3fm, std=%.4fm",
+                label,
+                valid_pts[:, 2].min(), valid_pts[:, 2].max(),
+                np.median(valid_pts[:, 2]), np.std(valid_pts[:, 2]),
+            )
+
     if on_progress:
-        on_progress("pass4_triangulation", n_frames, n_frames, "Triangulation complete")
+        on_progress("pass4_triangulation", n_frames, n_frames, "Back-projection complete")
     logger.info("Pass 4 complete")

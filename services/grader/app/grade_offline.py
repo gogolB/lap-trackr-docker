@@ -384,18 +384,28 @@ def main() -> None:
     console.print(timing_table)
     console.print()
 
-    # Metrics table
+    # Metrics table with units
+    _METRIC_UNITS = {
+        "workspace_volume": ("Workspace Volume", "cm³"),
+        "avg_speed": ("Avg Speed", "mm/s"),
+        "max_jerk": ("Max Jerk (P95)", "mm/s³"),
+        "path_length": ("Path Length", "mm"),
+        "economy_of_motion": ("Economy of Motion", "ratio 0–1"),
+        "total_time": ("Total Time", "s"),
+    }
     metrics_table = Table(title="Grading Metrics", show_lines=False)
     metrics_table.add_column("Metric", style="bold")
     metrics_table.add_column("Value", justify="right")
+    metrics_table.add_column("Unit", style="dim")
 
     for key, value in metrics.items():
         if key == "per_instrument":
             continue
+        label, unit = _METRIC_UNITS.get(key, (key, ""))
         if isinstance(value, float):
-            metrics_table.add_row(key, f"{value:.4f}")
+            metrics_table.add_row(label, f"{value:.4f}", unit)
         else:
-            metrics_table.add_row(key, str(value))
+            metrics_table.add_row(label, str(value), unit)
     console.print(metrics_table)
 
     # Warnings
