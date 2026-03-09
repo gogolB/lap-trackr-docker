@@ -61,36 +61,42 @@ Because this is offline, color thresholds should be adapted from the full video 
 
 Color is also the strongest identity cue because there is never more than one green instrument and one pink instrument.
 
-### Pass 4: Multi-View Triangulation
+### Pass 4: Depth-Map Back-Projection with Cross-Camera Validation
 
-Do not treat the ZED depth map as the final 3D answer. Use matched 2D tip observations and calibrated camera matrices to triangulate 3D positions directly.
+Each ZED camera already produces high-quality depth maps from its internal stereo pair (SGM / neural depth). These are the primary source of 3D positions — not cross-camera DLT triangulation, which fails when the two cameras are at near-perpendicular viewing angles with different focal lengths and CoTracker tracks drift independently.
 
-With two stereo ZED cameras, the system can use up to four synchronized views. The preferred formulation is overdetermined triangulation using all valid views for a frame, with reprojection error retained as a confidence signal.
+The approach:
+
+1. Back-project the 2D tip track from each camera using its own depth map → 3D point in that camera's frame
+2. Transform the off-axis point into the on-axis frame using the stereo calibration `T_off_to_on`
+3. If both cameras produce valid back-projections and they agree within 50 mm, take a visibility-weighted average
+4. If they disagree, use the estimate with higher CoTracker visibility confidence
+5. If only one camera has a valid track + depth, use it directly
+
+Depth range gating (0.05–3.0 m) rejects physically impossible values. All 3D positions are in the on-axis camera coordinate frame.
 
 This pass should produce:
 
 - per-frame 3D positions for `green_tip` and `pink_tip`
-- per-frame reprojection residuals
-- per-view outlier rejection when one camera view is inconsistent
+- diagnostic counts: how many frames were fused, single-camera, disagreed, or had no valid depth
 
-### Pass 5: Trajectory Smoothing and Global Optimization
+### Pass 5: Trajectory Smoothing (RTS with Innovation Gating)
 
-After triangulation, smooth the full 3D trajectories with a fixed-interval method that can use future frames as well as past frames.
+After back-projection, smooth the full 3D trajectories using a Rauch-Tung-Striebel (RTS) fixed-interval smoother. The RTS smoother uses both past and future observations — no phase lag, globally optimal for the constant-velocity motion model.
 
-Recommended options:
+Key design choices:
 
-- smoothing spline
-- Rauch-Tung-Striebel (RTS) smoother
-- sparse batch optimization minimizing reprojection error plus trajectory smoothness
-
-If a trocar / fulcrum point is available, add it as a constraint during optimization. That materially improves conditioning and reduces implausible tool motion.
+- **Innovation gating** — before accepting a measurement, the Kalman filter checks the Mahalanobis distance of the innovation (predicted vs observed). Measurements that exceed the chi-squared threshold (3 DOF, 99 % confidence = 11.345) are rejected and the filter coasts on its prediction. This catches any residual outliers that survived Pass 4.
+- **Realistic measurement noise** — R_BASE = 5×10⁻⁵ m² (≈7 mm std dev), reflecting ZED stereo depth noise plus CoTracker pixel uncertainty.
+- **Piecewise-constant-acceleration process noise** — assumes random acceleration impulses with σ_a = 0.8 m/s², coupling position and velocity uncertainty correctly.
+- **Gap-aware Q scaling** — process noise increases by 5× per consecutive unobserved frame, allowing the filter to widen its uncertainty during occlusions.
 
 This pass should prioritize:
 
 - low jitter
 - no phase lag
+- rejection of physically implausible measurements
 - identity stability through crossings
-- physically plausible trajectories
 
 ### Pass 6: Identity Verification
 
@@ -132,7 +138,6 @@ Required outputs:
 - timestamps for every frame
 - per-frame confidence values
 - per-frame provenance describing which pass supplied the observation
-- reprojection residuals for triangulated points
 - review flags for disagreement between segmentation, tracking, and color identity
 
 Derived grading metrics such as path length, smoothness / jerk, time to task completion, and economy of motion should be computed from these cleaned 3D trajectories rather than from raw per-frame detections.

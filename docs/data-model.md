@@ -52,7 +52,7 @@ Deleting a session cascades to `grading_results` and any session-scoped `calibra
 | `session_id` | UUID | FK -> `sessions.id`, UNIQUE, NOT NULL | One grading result per session |
 | `workspace_volume` | FLOAT | NULLABLE | Convex-hull volume of fused tip positions |
 | `avg_speed` | FLOAT | NULLABLE | Mean tip speed |
-| `max_jerk` | FLOAT | NULLABLE | Peak jerk |
+| `max_jerk` | FLOAT | NULLABLE | 95th-percentile jerk (P95) |
 | `path_length` | FLOAT | NULLABLE | Total tip travel distance |
 | `economy_of_motion` | FLOAT | NULLABLE | Direct distance / total path |
 | `total_time` | FLOAT | NULLABLE | Graded duration in seconds |
@@ -241,12 +241,14 @@ Produced by the grading pipeline. Contains surgical skill metrics.
 
 | Metric | Unit | Description |
 |--------|------|-------------|
-| `workspace_volume` | cm^3 | Convex hull volume of all 3D tip positions. Requires at least 4 valid points |
-| `avg_speed` | mm/s | Mean speed across all frames for both tips |
-| `max_jerk` | mm/s^3 | Peak third derivative of position |
-| `path_length` | mm | Total Euclidean distance traveled |
-| `economy_of_motion` | 0-1 | Direct distance divided by total path |
+| `workspace_volume` | cm³ | Convex hull volume of all 3D tip positions (after MAD outlier filtering). Requires at least 4 valid points |
+| `avg_speed` | mm/s | Mean tip speed computed from actual inter-frame time gaps |
+| `max_jerk` | mm/s³ | 95th-percentile jerk magnitude (P95, not absolute max — robust to noise amplification at high frame rates) |
+| `path_length` | mm | Total Euclidean distance traveled by both tips |
+| `economy_of_motion` | 0–1 | Direct start-to-end distance divided by total path length (mean across tips) |
 | `total_time` | seconds | Duration from first to last processed frame |
+
+Metrics are computed after MAD-based outlier filtering (modified Z-score, threshold 3.5) which removes residual triangulation/tracking failures before they can distort workspace volume or speed statistics.
 
 ### `poses.json`
 

@@ -140,8 +140,10 @@ This transform is used during dual-camera fusion in the grading pipeline to tria
 
 During grading, calibration data is used to:
 
-1. **Back-project 2D detections to 3D**: Using intrinsics (fx, fy, cx, cy) + depth
-2. **Transform to world frame**: Using the extrinsic matrix (camera-to-board transform)
-3. **Fuse dual cameras**: Using the stereo transform to triangulate and cross-reference
+1. **Back-project 2D detections to 3D**: Each camera's intrinsics (fx, fy, cx, cy) are used with its own ZED depth map to convert 2D tip tracks into 3D positions in that camera's coordinate frame.
+2. **Cross-camera validation**: The stereo transform `T_on_to_off` (and its inverse `T_off_to_on`) transforms the off-axis 3D estimate into the on-axis frame. If both cameras agree within 50 mm, their estimates are averaged (weighted by visibility confidence). Disagreement flags a bad track on one camera.
+3. **Transform to world frame**: The extrinsic matrix (camera-to-board) can place positions in the workspace frame for reporting.
 
-Without calibration, the grader falls back to default intrinsic values and operates in the camera frame (no world-frame transformation). Metrics will still be computed but may be less accurate.
+Note: The system does **not** use DLT triangulation across the two ZED cameras. Because the cameras are positioned at near-perpendicular viewing angles with different focal lengths, cross-camera pixel correspondence is unreliable. Instead, each ZED camera's own high-quality stereo depth map provides the depth, and the stereo calibration is used only for coordinate-frame alignment and cross-validation.
+
+Without calibration, the grader falls back to default intrinsic values and operates in the on-axis camera frame (no cross-camera validation or world-frame transformation). Metrics will still be computed but may be less accurate.

@@ -125,8 +125,8 @@ User clicks Grade ──▸ API POST /sessions/{id}/grade
   ──▸ Pass 1: SAM2 per-view segmentation
   ──▸ Pass 2: CoTracker3 tip refinement from confirmed tip-init points
   ──▸ Pass 3: Color-based gap fill and identity checks
-  ──▸ Pass 4: Multi-view triangulation with reprojection residuals
-  ──▸ Pass 5: Full-trajectory smoothing / optimization
+  ──▸ Pass 4: Depth-map back-projection with cross-camera validation
+  ──▸ Pass 5: RTS trajectory smoothing with innovation gating
   ──▸ Pass 6: Final green/pink identity verification
   ──▸ Render tracking overlay videos
   ──▸ Compute metrics (workspace volume, speed, jerk, path length, economy, duration)

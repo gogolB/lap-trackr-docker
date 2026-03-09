@@ -135,13 +135,26 @@ Those frame indices matter. Offline trackers must start from the correct sampled
 
 At the system level, backends are not interchangeable replacements for one another. They serve different passes:
 
-1. **SAM2** segments the taped instruments per view
-2. **CoTracker3** refines tip points from confirmed prompts
-3. **Color analysis** fills or verifies low-confidence gaps
-4. **Multi-view triangulation** reconstructs 3D positions
-5. **Smoothing / optimization** produces the final trajectories
+1. **SAM2 / SAM3** segments the taped instruments per view (Pass 1)
+2. **CoTracker3** refines tip points from mask centroids, per-chunk seeding (Pass 2)
+3. **Color analysis** fills or verifies low-confidence gaps (Pass 3)
+4. **Depth-map back-projection** reconstructs 3D positions using each ZED camera's depth map, with cross-camera validation via stereo calibration (Pass 4)
+5. **RTS smoothing** with innovation gating produces the final trajectories (Pass 5)
+6. **Identity verification** confirms green/pink labels are consistent (Pass 6)
 
 This is intentionally different from a real-time detector-first design.
+
+### Memory-Aware Execution
+
+The pipeline staggers camera loading to limit peak memory:
+
+- Phase 1: Load on-axis frames only (no depth), run Pass 1 on-axis
+- Phase 2: Load off-axis frames, run Pass 1 off-axis
+- Passes 2–3 run with both cameras' frames in memory
+- Phase 3: Load depth maps just before Pass 4, free them immediately after
+- After rendering: free frame data
+
+Masks are stored as RLE-encoded packed bits (8× smaller than full masks) and forward/backward propagation masks are merged in a streaming fashion to avoid materializing two full mask dictionaries.
 
 ## Adding a New Backend
 
