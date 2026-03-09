@@ -5,7 +5,7 @@ Panels:
   A) Video frame with 2D tip-track overlay
   B) 3D trajectory with convex-hull wireframe
   C) Velocity profile over time
-  D) Radar chart of skill-assessment dimensions
+  D) Per-instrument metric comparison
 
 Usage:
     python generate_poster_figure.py <session_dir> [options]
@@ -267,118 +267,139 @@ def panel_velocity(ax: plt.Axes, poses: list[dict]) -> None:
                   fontsize=13, fontweight="bold", pad=10)
 
 
-# ── Panel D: Radar chart ────────────────────────────────────────────────────
+# ── Panel D: Dual-instrument radar chart ───────────────────────────────────
 
-_RADAR_DIMENSIONS = [
-    "Workspace\nVolume",
-    "Economy of\nMotion",
-    "Smoothness",
-    "Speed\nControl",
-    "Path\nEfficiency",
+# Metrics shown on the radar, in clockwise order.
+# Each entry: (json_key, display_label, unit, invert)
+# invert=True means *lower* raw values are better (map to outer ring).
+_RADAR_METRICS = [
+    ("workspace_volume", "Workspace\nVolume", "cm³", False),
+    ("avg_speed", "Avg\nSpeed", "mm/s", False),
+    ("path_length", "Path\nLength", "mm", False),
+    ("economy_of_motion", "Economy of\nMotion", "", False),
+    ("max_jerk", "Smoothness\n(1/Jerk)", "mm/s³", True),
 ]
 
 
-def _normalize_metrics(metrics: dict) -> tuple[list[float], list[str]]:
-    """Normalize raw metrics to 0-1 for each radar dimension.
-
-    Returns (normalized_values, annotation_strings).
-    """
-    ws_vol = metrics.get("workspace_volume", 0)       # cm³
-    economy = metrics.get("economy_of_motion", 0)      # 0-1
-    max_jerk = metrics.get("max_jerk", 1)               # mm/s³
-    avg_speed = metrics.get("avg_speed", 0)             # mm/s
-    path_length = metrics.get("path_length", 0)         # mm
-    total_time = metrics.get("total_time", 1)           # s
-
-    # 1) Workspace volume: 0 → 0, 5000 cm³ → 1
-    ws_norm = min(ws_vol / 5000.0, 1.0)
-
-    # 2) Economy of motion: direct 0-1
-    eco_norm = economy
-
-    # 3) Smoothness: inverse of jerk (log scale)
-    #    Lower jerk = smoother. Use log10 mapping.
-    if max_jerk > 0:
-        # log10(1e8) = 8 → score 0, log10(1) = 0 → score 1
-        smooth_norm = max(1.0 - np.log10(max(max_jerk, 1)) / 8.0, 0.0)
-    else:
-        smooth_norm = 1.0
-
-    # 4) Speed control: penalize very high avg speed (>200 mm/s is fast)
-    #    Ideal range is 20-100 mm/s for deliberate movement
-    speed_norm = max(1.0 - abs(avg_speed - 60) / 200.0, 0.0)
-
-    # 5) Path efficiency: economy * time factor
-    #    Shorter total path relative to workspace extent = more efficient
-    if ws_vol > 0:
-        # Approximate workspace extent as cube root of volume (cm → mm)
-        extent_mm = (ws_vol ** (1/3)) * 10.0
-        path_ratio = path_length / max(extent_mm, 1.0)
-        path_eff = max(1.0 - path_ratio / 50.0, 0.0)
-    else:
-        path_eff = 0.0
-
-    values = [ws_norm, eco_norm, smooth_norm, speed_norm, path_eff]
-    def _compact(val: float, unit: str) -> str:
-        if abs(val) >= 1e6:
-            return f"{val:.1e} {unit}"
-        if abs(val) >= 1000:
-            return f"{val:.0f} {unit}"
-        return f"{val:.1f} {unit}"
-
-    annotations = [
-        _compact(ws_vol, "cm³"),
-        f"{economy:.3f}",
-        _compact(max_jerk, "mm/s³"),
-        _compact(avg_speed, "mm/s"),
-        _compact(path_length, "mm"),
-    ]
-    return values, annotations
+def _fmt_value(val: float, unit: str) -> str:
+    """Compact human-readable value string."""
+    if val >= 10000:
+        return f"{val:,.0f} {unit}".strip()
+    if val >= 100:
+        return f"{val:.1f} {unit}".strip()
+    if val >= 1:
+        return f"{val:.2f} {unit}".strip()
+    if val >= 0.001:
+        return f"{val:.4f} {unit}".strip()
+    return f"{val:.2e} {unit}".strip()
 
 
 def panel_radar(ax: plt.Axes, metrics: dict) -> None:
-    values, annotations = _normalize_metrics(metrics)
-    N = len(_RADAR_DIMENSIONS)
+    """Dual-polygon radar chart comparing green_tip vs pink_tip.
+
+    Each axis is normalized to the max of the two instruments, so the chart
+    shows relative head-to-head comparison without arbitrary benchmarks.
+    """
+    ax.set_facecolor(BG_PANEL)
+
+    per_inst = metrics.get("per_instrument", {})
+    green = per_inst.get("green_tip", {})
+    pink = per_inst.get("pink_tip", {})
+
+    if not green and not pink:
+        ax.text(0.5, 0.5, "No per-instrument data",
+                transform=ax.transAxes, ha="center", va="center",
+                color=TEXT_COLOR, fontsize=14)
+        ax.set_title("D) Instrument Comparison", color=TEXT_COLOR,
+                      fontsize=13, fontweight="bold", pad=10)
+        return
+
+    N = len(_RADAR_METRICS)
     angles = np.linspace(0, 2 * np.pi, N, endpoint=False).tolist()
-    # Close the polygon
-    values_closed = values + [values[0]]
     angles_closed = angles + [angles[0]]
 
-    ax.set_facecolor(BG_PANEL)
+    g_values = []
+    p_values = []
+    g_annotations = []
+    p_annotations = []
+
+    for key, label, unit, invert in _RADAR_METRICS:
+        g_raw = green.get(key, 0)
+        p_raw = pink.get(key, 0)
+        max_val = max(g_raw, p_raw, 1e-10)
+
+        # Normalize to [0, 1] relative to max of the two instruments
+        g_norm = g_raw / max_val
+        p_norm = p_raw / max_val
+
+        # For inverted metrics (like jerk), lower is better → flip
+        if invert:
+            g_norm = 1.0 - g_norm + 0.15 if g_norm < 1.0 else 0.15
+            p_norm = 1.0 - p_norm + 0.15 if p_norm < 1.0 else 0.15
+
+        # Ensure a minimum visible radius
+        g_norm = max(g_norm, 0.08)
+        p_norm = max(p_norm, 0.08)
+
+        g_values.append(g_norm)
+        p_values.append(p_norm)
+        g_annotations.append(_fmt_value(g_raw, unit))
+        p_annotations.append(_fmt_value(p_raw, unit))
+
+    g_closed = g_values + [g_values[0]]
+    p_closed = p_values + [p_values[0]]
+
     ax.set_theta_offset(np.pi / 2)
     ax.set_theta_direction(-1)
 
-    # Draw reference circles
+    # Reference circles
     for r in [0.25, 0.5, 0.75, 1.0]:
         ax.plot(np.linspace(0, 2 * np.pi, 100), [r] * 100,
-                color=GRID_COLOR, linewidth=0.5, alpha=0.5)
+                color=GRID_COLOR, linewidth=0.5, alpha=0.4)
 
-    # Fill polygon
-    ax.fill(angles_closed, values_closed, color="#4ecdc4", alpha=0.25)
-    ax.plot(angles_closed, values_closed, color="#4ecdc4", linewidth=2.5,
-            marker="o", markersize=6, markerfacecolor="#4ecdc4",
-            markeredgecolor="white", markeredgewidth=1)
+    # Green instrument polygon
+    ax.fill(angles_closed, g_closed, color=GREEN, alpha=0.15)
+    ax.plot(angles_closed, g_closed, color=GREEN, linewidth=2.0,
+            marker="o", markersize=5, markerfacecolor=GREEN,
+            markeredgecolor="white", markeredgewidth=0.8, label="Green Tip")
 
-    # Labels and annotations
+    # Pink instrument polygon
+    ax.fill(angles_closed, p_closed, color=PINK, alpha=0.15)
+    ax.plot(angles_closed, p_closed, color=PINK, linewidth=2.0,
+            marker="o", markersize=5, markerfacecolor=PINK,
+            markeredgecolor="white", markeredgewidth=0.8, label="Pink Tip")
+
+    # Axis labels
     ax.set_xticks(angles)
-    ax.set_xticklabels(_RADAR_DIMENSIONS, color=TEXT_COLOR, fontsize=8.5,
-                        fontweight="bold")
-    ax.set_ylim(0, 1.15)
-    ax.set_yticks([0.25, 0.5, 0.75, 1.0])
-    ax.set_yticklabels(["0.25", "0.5", "0.75", "1.0"],
-                        color=TEXT_COLOR, fontsize=7, alpha=0.6)
+    ax.set_xticklabels([m[1] for m in _RADAR_METRICS],
+                        color=TEXT_COLOR, fontsize=8.5, fontweight="bold")
+    ax.set_ylim(0, 1.25)
+    ax.set_yticks([])  # hide radial ticks — values are annotated directly
     ax.spines["polar"].set_color(GRID_COLOR)
-    ax.grid(color=GRID_COLOR, alpha=0.3)
+    ax.grid(color=GRID_COLOR, alpha=0.25)
 
-    # Annotate raw values near each vertex
-    for i, (angle, val, ann) in enumerate(zip(angles, values, annotations)):
-        r_offset = max(val, 0.15) + 0.13
-        ax.text(angle, r_offset, ann, ha="center", va="center",
-                fontsize=7.5, color=TEXT_COLOR, alpha=0.85,
-                bbox=dict(boxstyle="round,pad=0.2", fc=BG_PANEL, alpha=0.7,
-                          edgecolor="none"))
+    # Annotate raw values: single combined label per vertex
+    for i, angle in enumerate(angles):
+        outer_r = max(g_values[i], p_values[i]) + 0.18
+        combined = f"{g_annotations[i]}  /  {p_annotations[i]}"
+        ax.text(angle, outer_r, combined,
+                ha="center", va="center", fontsize=6.5, color=TEXT_COLOR,
+                bbox=dict(boxstyle="round,pad=0.2", fc=BG_PANEL, alpha=0.85,
+                          edgecolor=GRID_COLOR, linewidth=0.5))
 
-    ax.set_title("D) Skill Assessment", color=TEXT_COLOR,
+    ax.legend(loc="lower right", fontsize=8, framealpha=0.6,
+              labelcolor=TEXT_COLOR, facecolor=BG_PANEL, edgecolor=GRID_COLOR,
+              bbox_to_anchor=(1.15, -0.05))
+
+    # Session summary
+    total_time = metrics.get("total_time", 0)
+    ws_vol = metrics.get("workspace_volume", 0)
+    ax.text(0.5, -0.12,
+            f"Session: {total_time:.1f}s  |  Combined Workspace: {ws_vol:.0f} cm³",
+            transform=ax.transAxes, ha="center", va="top",
+            fontsize=8, color=TEXT_COLOR, alpha=0.7, style="italic")
+
+    ax.set_title("D) Instrument Comparison", color=TEXT_COLOR,
                   fontsize=13, fontweight="bold", pad=20)
 
 
@@ -421,7 +442,7 @@ def generate_figure(session_dir: Path, output: Path, frame_idx: int | None,
     ax_c = fig.add_subplot(2, 2, 3)
     panel_velocity(ax_c, poses)
 
-    # Panel D — bottom-right (polar)
+    # Panel D — bottom-right (polar radar)
     ax_d = fig.add_subplot(2, 2, 4, polar=True)
     panel_radar(ax_d, metrics)
 
